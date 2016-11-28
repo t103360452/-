@@ -750,7 +750,7 @@ state_dns_lookup(TSCont contp, TSEvent event, TSHostLookupResult host_info)
 	//..............................................
 		int url_num,thread;
 		char url_parsed[100][200];
-		char ori_server[2][20]={"www.ntut.edu.tw","www.ntut.edu.tw"};
+		char ori_server[2][20]={"www.cwb.gov.tw","www.cwb.gov.tw"};
 		
 		parsing_request_all_URL(http_response,url_parsed);
 		url_num=get_num_url(url_parsed);
@@ -1071,36 +1071,7 @@ state_write_to_cache(TSCont contp, TSEvent event, TSVIO vio)
 			  set_handler(txn_sm->q_current_handler, (TxnSMHandler)&state_handle_cache_lookup);
 			  txn_sm->q_pending_action = TSCacheRead(contp, txn_sm->q_key);
 		}
-		//jesse
-		/*else{
-				TSVConnClose(txn_sm->q_cache_vc);
-				TSDebug("HTTP_plugin", "jesse re-enable cache_write_vio ");
-				txn_sm->count++;
-				
-				txn_sm->q_cache_vc        = NULL;
-				txn_sm->q_cache_write_vio = NULL;
-				TSIOBufferReaderFree(txn_sm->q_cache_response_buffer_reader);
-				txn_sm->q_pending_action = NULL;
-				TSAssert(txn_sm->q_pending_action == NULL);
-				txn_sm->q_key = NULL;
-				TSDebug("HTTP_plugin", "1");
-				TSCacheKeyDestroy(txn_sm->q_key);
-				TSDebug("HTTP_plugin", "2");
-				txn_sm->apple_key =NULL;
-				txn_sm->apple_key = (TSCacheKey)CacheKeyCreate("/ezfiles/21/1021/img/2153/banner14.jpg");	//利用q_file_name建立cache key
-				TSDebug("HTTP_plugin", "3");
-				set_handler(txn_sm->q_current_handler, (TxnSMHandler)&jeese_test);
-				txn_sm->q_pending_action = TSCacheRead(contp, txn_sm->apple_key);
-				 
-				
-				
-			//	txn_sm->q_pending_action = TSCacheWrite(contp, txn_sm->q_key);
-				
-			//	TSIOBufferWrite(txn_sm->q_server_response_buffer, txn_sm->server_response[1], txn_sm->response_byte_read[1]);
-			//	txn_sm->q_cache_write_vio = TSVConnWrite(txn_sm->q_cache_vc, contp, txn_sm->q_cache_response_buffer_reader, txn_sm->response_byte_read[1]);
-				
-
-		}*/
+		
      
     } else { /* not done with writing into cache */
 
@@ -1125,7 +1096,7 @@ jeese_test(TSCont contp, TSEvent event, TSVConn vc)
 	  TSDebug("HTTP_plugin", "jesse enter state_handle_cache_prepare_for_write");
 
 	  txn_sm->q_pending_action = NULL;
-		int jesse_size;
+	  int jesse_size;
 	  switch (event) {
 	  case TS_EVENT_CACHE_OPEN_WRITE:
 		
@@ -1134,20 +1105,17 @@ jeese_test(TSCont contp, TSEvent event, TSVConn vc)
 		txn_sm->q_server_response_buffer       = TSIOBufferCreate();
 		txn_sm->q_cache_response_buffer_reader = TSIOBufferReaderAlloc(txn_sm->q_server_response_buffer);
 		//寫response到buffer
-		TSIOBufferWrite(txn_sm->q_server_response_buffer, txn_sm->server_response[0], txn_sm->response_byte_read[0]);
+		TSIOBufferWrite(txn_sm->q_server_response_buffer, txn_sm->server_response[txn_sm->count], 
+														txn_sm->response_byte_read[txn_sm->count]);
 		jesse_size = TSIOBufferReaderAvail(txn_sm->q_cache_response_buffer_reader); 
-		TSDebug("HTTP_plugin", "cache Buffer size is = %d , actually size is = %d",jesse_size,txn_sm->response_byte_read[0]);
+		TSDebug("HTTP_plugin", "cache Buffer size is = %d , actually size is = %d",jesse_size,txn_sm->response_byte_read[txn_sm->count]);
 		//把buffer裡的資料傳過去	
 		
-		txn_sm->q_cache_write_vio = TSVConnWrite(txn_sm->q_cache_vc, contp, txn_sm->q_cache_response_buffer_reader, txn_sm->response_byte_read[0]);
+		txn_sm->q_cache_write_vio = TSVConnWrite(txn_sm->q_cache_vc, contp, txn_sm->q_cache_response_buffer_reader, txn_sm->response_byte_read[txn_sm->count]);
 		set_handler(txn_sm->q_current_handler, (TxnSMHandler)&jesse_test_write_complete);
 		
 		
 		return TS_SUCCESS;
-		
-		
-		
-		
 		
 		break;
 	  default:
@@ -1156,7 +1124,7 @@ jeese_test(TSCont contp, TSEvent event, TSVConn vc)
 		return prepare_to_die(contp);
 		break;
 	  }
-	  return state_build_and_send_request(contp, 0, NULL);
+	  return prepare_to_die(contp);
 }
 
 
@@ -1188,9 +1156,24 @@ jesse_test_write_complete(TSCont contp, TSEvent event, TSVIO vio)
 			  //set_handler(txn_sm->q_current_handler, (TxnSMHandler)&state_handle_cache_lookup);
 			  //txn_sm->q_pending_action = TSCacheRead(contp, txn_sm->q_key);
 		
-		
-     
-    return state_done(contp, 0, NULL) ;
+		if(txn_sm->count == (txn_sm->number-1))
+			return state_done(contp, 0, NULL) ;
+		else
+		{
+			TSDebug("HTTP_plugin", "enter next file write to cache");
+			txn_sm->count++;
+			
+			TSCacheKeyDestroy(txn_sm->q_key);
+			txn_sm->q_key =NULL;
+			
+			TSDebug("HTTP_plugin", "create cachekey is == %s",txn_sm->filename[txn_sm->count]);
+			txn_sm->q_key = (TSCacheKey)CacheKeyCreate(txn_sm->filename[txn_sm->count]);	//利用q_file_name建立cache key
+	
+			set_handler(txn_sm->q_current_handler, (TxnSMHandler)&jeese_test);
+			txn_sm->q_pending_action = TSCacheWrite(contp, txn_sm->q_key);
+			
+			return TS_SUCCESS;
+		}
     //return TS_SUCCESS;
   default:
     break;
@@ -1237,13 +1220,13 @@ state_send_response_to_client(TSCont contp, TSEvent event, TSVIO vio)
     txn_sm->q_client_write_vio = NULL;
 	if( (txn_sm->count == 0) && (txn_sm->number != 0) )
 	{//jesse
-			txn_sm->count++;
+			
 		
 			TSCacheKeyDestroy(txn_sm->q_key);
 			txn_sm->q_key =NULL;
 			
-			TSDebug("HTTP_plugin", "create cachekey is == %s",txn_sm->filename[0]);
-			txn_sm->q_key = (TSCacheKey)CacheKeyCreate(txn_sm->filename[0]);	//利用q_file_name建立cache key
+			TSDebug("HTTP_plugin", "create cachekey is == %s",txn_sm->filename[txn_sm->count]);
+			txn_sm->q_key = (TSCacheKey)CacheKeyCreate(txn_sm->filename[txn_sm->count]);	//利用q_file_name建立cache key
 	
 			set_handler(txn_sm->q_current_handler, (TxnSMHandler)&jeese_test);
 			txn_sm->q_pending_action = TSCacheWrite(contp, txn_sm->q_key);
@@ -1302,6 +1285,18 @@ state_done(TSCont contp, TSEvent event ATS_UNUSED, TSVIO vio ATS_UNUSED)
 
   TSDebug("HTTP_plugin", "enter state_done");
 
+  if(txn_sm->server_response)
+  {
+	TSDebug("HTTP_plugin", "enter free server_response");
+	txn_sm->server_response = NULL;
+  }
+  
+   if(txn_sm->response_byte_read)
+  {
+	TSDebug("HTTP_plugin", "enter free response_byte_read");
+	txn_sm->response_byte_read = NULL;
+  }
+  
   if (txn_sm->q_pending_action && !TSActionDone(txn_sm->q_pending_action)) {
     TSDebug("HTTP_plugin", "cancelling pending action %p", txn_sm->q_pending_action);
     TSActionCancel(txn_sm->q_pending_action);
