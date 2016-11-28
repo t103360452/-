@@ -39,6 +39,15 @@ TSCont TxnSMCreate(TSMutex pmutex, TSVConn client_vc, int server_port);
 
 /* The Txn State Machine */
 typedef struct _TxnSM {
+	//custom
+	char **filename;
+	char **server_response;				//存server response用
+	long *response_byte_read;			//存server response size
+	int number;							//儲存總共幾個response
+	int count;		//紀錄寫入cache次數
+	TSCacheKey apple_key;	
+	//custom end	
+	
   unsigned int q_magic;
 
   TSMutex q_mutex;
@@ -131,6 +140,8 @@ int get_header_length(char http_response[]);
 
 //............................................................
 //............................................................
+int jesse_test_write_complete(TSCont contp, TSEvent event, TSVIO vio);
+int jeese_test(TSCont contp, TSEvent event, TSVConn vc);
 int get_num_url(char *total_url);
 void parsing_request_all_URL(char *server_respone,char *result_parsing_url);
 void parsing_request_one_URL(char *k,char *one_url);
@@ -199,8 +210,7 @@ void* connectSocket(void* information) {
 	if(n<0)
 		error("ERROR writing to socket");
    
-   TSDebug("HTTP_plugin", "%s\n\n",request);
-   TSDebug("HTTP_plugin", "%d begin ",ID);
+
     bytes_read=0;
 	//接收response
 	do{
@@ -212,6 +222,7 @@ void* connectSocket(void* information) {
 		}while(n > 0);
 	//關閉socket
 		close(sockfd);
+	((struct thread_data*) information) ->thread_response_byte_read = bytes_read;
 	TSDebug("HTTP_plugin", "%d socket finish ",ID);		//接收完即顯示哪個做完
    
    
@@ -619,7 +630,7 @@ state_handle_cache_prepare_for_write(TSCont contp, TSEvent event, TSVConn vc)
     txn_sm->q_cache_vc = vc;
     break;
   default:
-    TSError("[protocol] Can't open cache write_vc, aborting txn");
+    TSDebug("HTTP_plugin", "Can't open cache write_vc, aborting txn");
     txn_sm->q_cache_vc = NULL;
     return prepare_to_die(contp);
     break;
@@ -731,15 +742,15 @@ state_dns_lookup(TSCont contp, TSEvent event, TSHostLookupResult host_info)
 		close(sockfd);
 
 		int bytes_size;
-		
+	//接收完respinse 並存到buffer裡	
 		TSIOBufferWrite(txn_sm->q_server_response_buffer, http_response, bytes_read);
 		bytes_size = TSIOBufferReaderAvail(txn_sm->q_cache_response_buffer_reader);
-	TSDebug("HTTP_plugin","first successful,response is\n %s",http_response);	
+	//TSDebug("HTTP_plugin","first successful,response is\n %s",http_response);	
 	//...........................................................
 	//..............................................
 		int url_num,thread;
 		char url_parsed[100][200];
-		char ori_server[2][20]={"www.cwb.gov.tw","www.cwb.gov.tw"};
+		char ori_server[2][20]={"www.ntut.edu.tw","www.ntut.edu.tw"};
 		
 		parsing_request_all_URL(http_response,url_parsed);
 		url_num=get_num_url(url_parsed);
@@ -773,20 +784,36 @@ state_dns_lookup(TSCont contp, TSEvent event, TSHostLookupResult host_info)
 				return EXIT_FAILURE;
 			}
 		}
-		int i=0;
 		
+				
 		for(thread = 0; thread < url_num; thread++){			
-			printf("%d response header is\n",thread);
-			for(i=0;i<=200;i++)
-				printf("%c",thread_array[thread].thread_server_response[i]);
-			printf("\n\n\n");
+			TSDebug("HTTP_plugin", "%s",url_parsed[thread]);
 		}
-	
-	
-	
-	
+
+		int i=0;
+		//宣告要存放filename資料的記憶體
+		txn_sm->filename =(char **) malloc (sizeof(char *)*url_num);
+		for(i=0;i<url_num;i++)
+			txn_sm->filename[i]=(char*)malloc(sizeof(char)*200);
+		//宣告要存response資料的記憶體
+		txn_sm->server_response =(char **) malloc (sizeof(char *)*url_num);
+		for(i=0;i<url_num;i++)
+			txn_sm->server_response[i]=(char*)malloc(sizeof(char)*1000000);
+		//宣告存response size資料的記憶體
+		txn_sm->response_byte_read=(char*)malloc(sizeof(char)*url_num);
 		
-		TSDebug("HTTP_plugin","all_response_size is %d , bytes_size is %d",bytes_read,bytes_size);
+		//把response相關資料存到txn_sm
+		for(i=0;i<url_num;i++)
+		{
+			memcpy(txn_sm->server_response[i],thread_array[i].thread_server_response,1000000);
+			memcpy(txn_sm->filename[i],thread_array[i].thread_filename,200);
+			txn_sm->response_byte_read[i]=thread_array[i].thread_response_byte_read;
+		}
+		txn_sm->number=url_num;
+		txn_sm->count=0;
+		free(thread_array);
+		//...............................................................//
+	
 		set_handler(txn_sm->q_current_handler, (TxnSMHandler)&state_interface_with_server);
 		txn_sm->q_cache_write_vio = TSVConnWrite(txn_sm->q_cache_vc, contp, txn_sm->q_cache_response_buffer_reader, bytes_size);
 
@@ -1031,17 +1058,50 @@ state_write_to_cache(TSCont contp, TSEvent event, TSVIO vio)
     }
 
     if (txn_sm->q_cache_response_length >= txn_sm->q_server_response_length) {
-      /* Write is complete, close the cache_vc. */
-      TSDebug("HTTP_plugin", "close cache_vc, cache_response_length is %d, server_response_lenght is %d",
-              txn_sm->q_cache_response_length, txn_sm->q_server_response_length);
-      TSVConnClose(txn_sm->q_cache_vc);
-      txn_sm->q_cache_vc        = NULL;
-      txn_sm->q_cache_write_vio = NULL;
-      TSIOBufferReaderFree(txn_sm->q_cache_response_buffer_reader);
+		if(txn_sm->count == 0){
+					 /* Write is complete, close the cache_vc. */
+			  TSDebug("HTTP_plugin", "close cache_vc, cache_response_length is %d, server_response_lenght is %d",
+					  txn_sm->q_cache_response_length, txn_sm->q_server_response_length);
+			  TSVConnClose(txn_sm->q_cache_vc);
+			  txn_sm->q_cache_vc        = NULL;
+			  txn_sm->q_cache_write_vio = NULL;
+			  TSIOBufferReaderFree(txn_sm->q_cache_response_buffer_reader);
 
-      /* Open cache_vc to read data and send to client. */
-      set_handler(txn_sm->q_current_handler, (TxnSMHandler)&state_handle_cache_lookup);
-      txn_sm->q_pending_action = TSCacheRead(contp, txn_sm->q_key);
+			  /* Open cache_vc to read data and send to client. */
+			  set_handler(txn_sm->q_current_handler, (TxnSMHandler)&state_handle_cache_lookup);
+			  txn_sm->q_pending_action = TSCacheRead(contp, txn_sm->q_key);
+		}
+		//jesse
+		/*else{
+				TSVConnClose(txn_sm->q_cache_vc);
+				TSDebug("HTTP_plugin", "jesse re-enable cache_write_vio ");
+				txn_sm->count++;
+				
+				txn_sm->q_cache_vc        = NULL;
+				txn_sm->q_cache_write_vio = NULL;
+				TSIOBufferReaderFree(txn_sm->q_cache_response_buffer_reader);
+				txn_sm->q_pending_action = NULL;
+				TSAssert(txn_sm->q_pending_action == NULL);
+				txn_sm->q_key = NULL;
+				TSDebug("HTTP_plugin", "1");
+				TSCacheKeyDestroy(txn_sm->q_key);
+				TSDebug("HTTP_plugin", "2");
+				txn_sm->apple_key =NULL;
+				txn_sm->apple_key = (TSCacheKey)CacheKeyCreate("/ezfiles/21/1021/img/2153/banner14.jpg");	//利用q_file_name建立cache key
+				TSDebug("HTTP_plugin", "3");
+				set_handler(txn_sm->q_current_handler, (TxnSMHandler)&jeese_test);
+				txn_sm->q_pending_action = TSCacheRead(contp, txn_sm->apple_key);
+				 
+				
+				
+			//	txn_sm->q_pending_action = TSCacheWrite(contp, txn_sm->q_key);
+				
+			//	TSIOBufferWrite(txn_sm->q_server_response_buffer, txn_sm->server_response[1], txn_sm->response_byte_read[1]);
+			//	txn_sm->q_cache_write_vio = TSVConnWrite(txn_sm->q_cache_vc, contp, txn_sm->q_cache_response_buffer_reader, txn_sm->response_byte_read[1]);
+				
+
+		}*/
+     
     } else { /* not done with writing into cache */
 
       TSDebug("HTTP_plugin", "re-enable cache_write_vio");
@@ -1051,6 +1111,91 @@ state_write_to_cache(TSCont contp, TSEvent event, TSVIO vio)
   default:
     break;
   }
+  
+
+  /* Something wrong if getting here. */
+  return prepare_to_die(contp);
+}
+
+int
+jeese_test(TSCont contp, TSEvent event, TSVConn vc)
+{
+	  TxnSM *txn_sm = (TxnSM *)TSContDataGet(contp);
+
+	  TSDebug("HTTP_plugin", "jesse enter state_handle_cache_prepare_for_write");
+
+	  txn_sm->q_pending_action = NULL;
+		int jesse_size;
+	  switch (event) {
+	  case TS_EVENT_CACHE_OPEN_WRITE:
+		
+		txn_sm->q_cache_vc = vc;
+		//宣告:
+		txn_sm->q_server_response_buffer       = TSIOBufferCreate();
+		txn_sm->q_cache_response_buffer_reader = TSIOBufferReaderAlloc(txn_sm->q_server_response_buffer);
+		//寫response到buffer
+		TSIOBufferWrite(txn_sm->q_server_response_buffer, txn_sm->server_response[0], txn_sm->response_byte_read[0]);
+		jesse_size = TSIOBufferReaderAvail(txn_sm->q_cache_response_buffer_reader); 
+		TSDebug("HTTP_plugin", "cache Buffer size is = %d , actually size is = %d",jesse_size,txn_sm->response_byte_read[0]);
+		//把buffer裡的資料傳過去	
+		
+		txn_sm->q_cache_write_vio = TSVConnWrite(txn_sm->q_cache_vc, contp, txn_sm->q_cache_response_buffer_reader, txn_sm->response_byte_read[0]);
+		set_handler(txn_sm->q_current_handler, (TxnSMHandler)&jesse_test_write_complete);
+		
+		
+		return TS_SUCCESS;
+		
+		
+		
+		
+		
+		break;
+	  default:
+		TSDebug("HTTP_plugin", "Can't open cache write_vc, aborting txn");
+		txn_sm->q_cache_vc = NULL;
+		return prepare_to_die(contp);
+		break;
+	  }
+	  return state_build_and_send_request(contp, 0, NULL);
+}
+
+
+int
+jesse_test_write_complete(TSCont contp, TSEvent event, TSVIO vio)
+{
+  TxnSM *txn_sm = (TxnSM *)TSContDataGet(contp);
+
+  TSDebug("HTTP_plugin", "enter jesse_test_write_complete");
+
+  switch (event) {
+  case TS_EVENT_VCONN_WRITE_READY:
+	TSDebug("HTTP_plugin","TS_EVENT_VCONN_WRITE_READY TSVIOReenable(txn_sm->q_cache_write_vio);");
+    TSVIOReenable(txn_sm->q_cache_write_vio);
+    return TS_SUCCESS;
+
+  case TS_EVENT_VCONN_WRITE_COMPLETE:
+    TSDebug("HTTP_plugin", "nbytes %" PRId64 ", ndone %" PRId64, TSVIONBytesGet(vio), TSVIONDoneGet(vio));
+    /* Since the first write is through TSVConnWrite, which aleady consume
+       the data in cache_buffer_reader, don't consume it again. */
+    
+	 /* Write is complete, close the cache_vc. */
+			  TSVConnClose(txn_sm->q_cache_vc);
+			  txn_sm->q_cache_vc        = NULL;
+			  txn_sm->q_cache_write_vio = NULL;
+			  TSIOBufferReaderFree(txn_sm->q_cache_response_buffer_reader);
+
+			  /* Open cache_vc to read data and send to client. */
+			  //set_handler(txn_sm->q_current_handler, (TxnSMHandler)&state_handle_cache_lookup);
+			  //txn_sm->q_pending_action = TSCacheRead(contp, txn_sm->q_key);
+		
+		
+     
+    return state_done(contp, 0, NULL) ;
+    //return TS_SUCCESS;
+  default:
+    break;
+  }
+  
 
   /* Something wrong if getting here. */
   return prepare_to_die(contp);
@@ -1090,7 +1235,22 @@ state_send_response_to_client(TSCont contp, TSEvent event, TSVIO vio)
     }
     txn_sm->q_client_read_vio  = NULL;
     txn_sm->q_client_write_vio = NULL;
-
+	if( (txn_sm->count == 0) && (txn_sm->number != 0) )
+	{//jesse
+			txn_sm->count++;
+		
+			TSCacheKeyDestroy(txn_sm->q_key);
+			txn_sm->q_key =NULL;
+			
+			TSDebug("HTTP_plugin", "create cachekey is == %s",txn_sm->filename[0]);
+			txn_sm->q_key = (TSCacheKey)CacheKeyCreate(txn_sm->filename[0]);	//利用q_file_name建立cache key
+	
+			set_handler(txn_sm->q_current_handler, (TxnSMHandler)&jeese_test);
+			txn_sm->q_pending_action = TSCacheWrite(contp, txn_sm->q_key);
+			
+	return TS_SUCCESS;
+	}
+	
     return state_done(contp, 0, NULL);
 
   default:
