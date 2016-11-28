@@ -42,7 +42,7 @@ typedef struct _TxnSM {
 	//custom
 	char **filename;
 	char **server_response;				//存server response用
-	long *response_byte_read;			//存server response size
+	int *response_byte_read;			//存server response size
 	int number;							//儲存總共幾個response
 	int count;		//紀錄寫入cache次數
 	TSCacheKey apple_key;	
@@ -142,11 +142,20 @@ int get_header_length(char http_response[]);
 //............................................................
 int jesse_test_write_complete(TSCont contp, TSEvent event, TSVIO vio);
 int jeese_test(TSCont contp, TSEvent event, TSVConn vc);
-int get_num_url(char *total_url);
-void parsing_request_all_URL(char *server_respone,char *result_parsing_url);
-void parsing_request_one_URL(char *k,char *one_url);
 
-//thread 編號
+void parsing_request_one_URL(char *k,char *one_url);
+	/*用途: 給 parsing_request_all_URL用的，只解析1組網址
+		 char *k  :要被解析出網址的陣列 ,資料型態:一維陣列
+		 one_url  :解析出來的網址存放在該位址 ,資料型態:一維陣列 
+	 */
+void parsing_request_all_URL(char *server_respone,char *result_parsing_url , int size, int *num);
+	/* 用途： 解析網頁裡頭所有相對路徑檔案網址,並計算有幾個 
+		server_respone	: 要被解析出網址的陣列 ,資料型態:一維陣列 
+		result_parsing_url:   把解析出來的網址存放在該位址 ,資料型態:傳入二維陣列的第一個地址 
+		size: 二維陣列中array[i][k]的k的size值
+		num : 把解析出來的網址的數量存放在該位址
+	*/
+
 struct thread_data {
     long thread_id;		//thread編號
     char thread_filename[200];		//欲請求的檔案
@@ -165,8 +174,8 @@ void* connectSocket(void* information) {
    
    int n,sockfd,bytes_read;
    char buffer[1024];				//暫存部分response
-	struct sockaddr_in serv_addr;  //用來保存socket資訊的資料結構
-	struct hostent *server; 	// server :存server用
+	struct sockaddr_in serv_addr;   //用來保存socket資訊的資料結構
+	struct hostent *server; 	    // server :存server用
 	
 	//宣告request 資料
 	char *request = (char *)malloc(sizeof(char) * (MAX_REQUEST_LENGTH + 1));  
@@ -184,10 +193,10 @@ void* connectSocket(void* information) {
 	//create socket
 	sockfd = socket(AF_INET, SOCK_STREAM, 0);
 	if (sockfd < 0) {
-		printf("thread id is %d",ID);
-		error("ERROR opening socket");
+		TSDebug("HTTP_plugin", "thread id is  %ld",ID);
+		TSError("ERROR opening socket");
 	}
-	serv_addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+	//serv_addr.sin_addr.s_addr = inet_addr("127.0.0.1");
     serv_addr.sin_family = AF_INET;
     serv_addr.sin_port = htons(80); 
 
@@ -195,7 +204,7 @@ void* connectSocket(void* information) {
 	//建立server資訊
 	server = gethostbyname(server_name);
 	if (server == NULL) {
-		printf("thread id is %d",ID);
+		printf("thread id is %ld",ID);
         fprintf(stderr,"ERROR, no such host\n");
         exit(0);
     }
@@ -203,12 +212,12 @@ void* connectSocket(void* information) {
 	bcopy((char *)server->h_addr, (char *)&serv_addr.sin_addr.s_addr, server->h_length);
 	//建立連線
 	if(connect(sockfd,(struct sockaddr *) &serv_addr,sizeof(serv_addr)) < 0)
-			error("connect failed. Error");
+			TSError("connect failed. Error");
 	
 	//送出request
 	n= write(sockfd,request,strlen(request));
 	if(n<0)
-		error("ERROR writing to socket");
+		TSError("ERROR writing to socket");
    
 
     bytes_read=0;
@@ -223,7 +232,7 @@ void* connectSocket(void* information) {
 	//關閉socket
 		close(sockfd);
 	((struct thread_data*) information) ->thread_response_byte_read = bytes_read;
-	TSDebug("HTTP_plugin", "%d socket finish ",ID);		//接收完即顯示哪個做完
+	
    
    
   
@@ -236,7 +245,7 @@ void* connectSocket(void* information) {
    is to assign the continuation handler to a specific function. */
 int get_response_size(char *k)
 {
-	int i=0 ,sum=0;
+	int i=0;
 	while(k[i]!='\0')
 	{
 		i++;
@@ -404,7 +413,7 @@ state_read_request_from_client(TSCont contp, TSEvent event, TSVIO vio ATS_UNUSED
 		char *buffer = malloc(1024);
 		fPtr = fopen("/srv/datavol/cdn/host.conf", "r");
 		if (fPtr) {
-			TSDebug("HTTP_plugin", "*************************************************************************************************************************open file successfully");
+			TSDebug("HTTP_plugin", "**************************open file successfully");
 			fread(buffer, 1, 1024, fPtr);
 			
 			fclose(fPtr);
@@ -421,8 +430,10 @@ state_read_request_from_client(TSCont contp, TSEvent event, TSVIO vio ATS_UNUSED
 		temp_buf = (char *)get_info_from_buffer(txn_sm->q_client_request_buffer_reader); 
       	
 		parsed_http_request = get_http_request_info(temp_buf);
-		txn_sm->q_file_name = parsed_http_request[1];
-
+		//txn_sm->q_file_name = parsed_http_request[1];
+		memcpy(txn_sm->q_file_name,parsed_http_request[1],100);
+		parsed_http_request= NULL;
+		
 		int http_request_length = strcspn(temp_buf,"\r");		
 		memcpy(txn_sm->q_client_request ,temp_buf, http_request_length+2);
 		strncat(txn_sm->q_client_request,"Host: ",6);
@@ -432,8 +443,8 @@ state_read_request_from_client(TSCont contp, TSEvent event, TSVIO vio ATS_UNUSED
 		
 		TSDebug("HTTP_plugin", "client request file name is %s", txn_sm->q_file_name);
 		TSDebug("HTTP_plugin", "client request is %s", txn_sm->q_client_request);
-		TSfree(temp_buf);	//釋放temp_buf的記憶體空間
-        
+		//TSfree(temp_buf);	//釋放temp_buf的記憶體空間
+        temp_buf= NULL;
 		//txn_sm->q_server_name = "dns.ntutee.ml"; 
 		
 		/* Start to do cache lookup */
@@ -745,15 +756,14 @@ state_dns_lookup(TSCont contp, TSEvent event, TSHostLookupResult host_info)
 	//接收完respinse 並存到buffer裡	
 		TSIOBufferWrite(txn_sm->q_server_response_buffer, http_response, bytes_read);
 		bytes_size = TSIOBufferReaderAvail(txn_sm->q_cache_response_buffer_reader);
-	//TSDebug("HTTP_plugin","first successful,response is\n %s",http_response);	
+	
 	//...........................................................
 	//..............................................
 		int url_num,thread;
 		char url_parsed[100][200];
 		char ori_server[2][20]={"www.cwb.gov.tw","www.cwb.gov.tw"};
 		
-		parsing_request_all_URL(http_response,url_parsed);
-		url_num=get_num_url(url_parsed);
+		parsing_request_all_URL(http_response,&url_parsed[0][0],200,&url_num);
 		
 		printf("url_num=%d\n",url_num);
 		
@@ -772,7 +782,7 @@ state_dns_lookup(TSCont contp, TSEvent event, TSHostLookupResult host_info)
 			
 			pthread_create(&thread_handles[thread], NULL, connectSocket, (void*) &thread_array[thread]);   //啟動thread
 		
-			printf("%d build socket successful \n",thread);
+			
 		}
 		
 		
@@ -784,7 +794,7 @@ state_dns_lookup(TSCont contp, TSEvent event, TSHostLookupResult host_info)
 				return EXIT_FAILURE;
 			}
 		}
-		
+		TSDebug("All socket finish", );
 				
 		for(thread = 0; thread < url_num; thread++){			
 			TSDebug("HTTP_plugin", "%s",url_parsed[thread]);
@@ -800,7 +810,7 @@ state_dns_lookup(TSCont contp, TSEvent event, TSHostLookupResult host_info)
 		for(i=0;i<url_num;i++)
 			txn_sm->server_response[i]=(char*)malloc(sizeof(char)*1000000);
 		//宣告存response size資料的記憶體
-		txn_sm->response_byte_read=(char*)malloc(sizeof(char)*url_num);
+		txn_sm->response_byte_read=(int*)malloc(sizeof(int)*url_num);
 		
 		//把response相關資料存到txn_sm
 		for(i=0;i<url_num;i++)
@@ -809,7 +819,9 @@ state_dns_lookup(TSCont contp, TSEvent event, TSHostLookupResult host_info)
 			memcpy(txn_sm->filename[i],thread_array[i].thread_filename,200);
 			txn_sm->response_byte_read[i]=thread_array[i].thread_response_byte_read;
 		}
+		//紀錄解析了幾個url
 		txn_sm->number=url_num;
+		//初始化
 		txn_sm->count=0;
 		free(thread_array);
 		//...............................................................//
@@ -1218,7 +1230,8 @@ state_send_response_to_client(TSCont contp, TSEvent event, TSVIO vio)
     }
     txn_sm->q_client_read_vio  = NULL;
     txn_sm->q_client_write_vio = NULL;
-	if( (txn_sm->count == 0) && (txn_sm->number != 0) )
+	
+	/*if( (txn_sm->count == 0) && (txn_sm->number != 0) )
 	{//jesse
 			
 		
@@ -1232,7 +1245,7 @@ state_send_response_to_client(TSCont contp, TSEvent event, TSVIO vio)
 			txn_sm->q_pending_action = TSCacheWrite(contp, txn_sm->q_key);
 			
 	return TS_SUCCESS;
-	}
+	}*/
 	
     return state_done(contp, 0, NULL);
 
@@ -1283,18 +1296,24 @@ state_done(TSCont contp, TSEvent event ATS_UNUSED, TSVIO vio ATS_UNUSED)
 {
   TxnSM *txn_sm = (TxnSM *)TSContDataGet(contp);
 
-  TSDebug("HTTP_plugin", "enter state_done");
+  TSDebug("HTTP_plugin", "jesse enter state_done");
 
-  if(txn_sm->server_response)
+  if(txn_sm->server_response != NULL)
   {
-	TSDebug("HTTP_plugin", "enter free server_response");
-	txn_sm->server_response = NULL;
+	TSDebug("HTTP_plugin", "jesse enter free server_response");
+	free(txn_sm->server_response);
   }
   
-   if(txn_sm->response_byte_read)
+  if(txn_sm->filename != NULL)
   {
-	TSDebug("HTTP_plugin", "enter free response_byte_read");
-	txn_sm->response_byte_read = NULL;
+	TSDebug("HTTP_plugin", "jesse enter free filename");
+	free(txn_sm->filename);
+  }
+  
+   if(txn_sm->response_byte_read != NULL)
+  {
+	TSDebug("HTTP_plugin", "jesse enter free response_byte_read");
+	free(txn_sm->response_byte_read);
   }
   
   if (txn_sm->q_pending_action && !TSActionDone(txn_sm->q_pending_action)) {
@@ -1522,22 +1541,11 @@ int get_header_length(char http_response[]){
 
 
 
-int get_num_url(char *total_url)
-	{
-		int num=0, sum=0;
-		while(*(total_url+sum)=='/')
-		{
-			sum+=200;
-			num++;
-		}
-	return num;
-	}
-	
 void parsing_request_one_URL(char *k,char *one_url)
 {
 	char *front_ptr_url,*end_ptr_url;
-	char *src_double_quotes="src=\"/";
-	char *src_apostrophe="src='/";
+	char src_double_quotes[]="src=\"/";
+	char src_apostrophe[]="src='/";
 		
 	if(strncmp(k,src_double_quotes,6)==0)
 		{
@@ -1555,31 +1563,37 @@ void parsing_request_one_URL(char *k,char *one_url)
 			memcpy(one_url,front_ptr_url,end_ptr_url-front_ptr_url);
 		}	
 }
-void parsing_request_all_URL(char *server_respone,char *result_parsing_url)
-{
-	int count=0;
+void parsing_request_all_URL(char *server_respone,char *result_parsing_url , int size, int *num)
+{		
+	int count=0,i;
 	char *front_ptr_url;
-	   
-	char *src_double_quotes="src=\"/";
-	char *src_apostrophe="src='/";
-	
-	
+	char src_double_quotes[]="src=\"/";
+	char src_apostrophe[]="src='/";
+	char temp[100][200];
+
+	//解析出  
 	front_ptr_url=strstr(server_respone,src_double_quotes);			
 	while(front_ptr_url!=NULL){  
 	
-		parsing_request_one_URL(front_ptr_url,&result_parsing_url[count]);
-		count+=200;                    //二維陣列,前往下一個二微陣列 
+		parsing_request_one_URL(front_ptr_url,temp[count++]);
 		front_ptr_url+=1;
 		front_ptr_url=strstr(front_ptr_url,src_double_quotes);
 	}
 	
-	front_ptr_url=strstr(server_respone,src_apostrophe);			
+	front_ptr_url=strstr(server_respone,src_apostrophe);				
 	while(front_ptr_url!=NULL){
-		parsing_request_one_URL(front_ptr_url,&result_parsing_url[count]);
-		count+=200; 
+		parsing_request_one_URL(front_ptr_url,temp[count++]); 
 		front_ptr_url+=1;
 		front_ptr_url=strstr(front_ptr_url,src_apostrophe);
-	}
+	}	
+	//把解析出的網址數量存到num 
+	*num=count;	
 	
-
+	//把解析出來的每個網址存到二維陣列中 
+	for(i=0;i<count;i++)
+	{	
+		memcpy(result_parsing_url,temp[i],200);	
+		result_parsing_url+=size;
+		
+	}
 }
