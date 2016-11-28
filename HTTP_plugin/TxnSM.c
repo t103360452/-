@@ -19,7 +19,7 @@
 #include <sys/types.h>
 #include <netinet/in.h>
 #include "ts/ink_defs.h"
-
+#include <pthread.h>
 #ifndef TXN_SM_H
 #define TXN_SM_H
 
@@ -32,6 +32,10 @@ TSCont TxnSMCreate(TSMutex pmutex, TSVConn client_vc, int server_port);
 #define TXN_SM_ALIVE 0xAAAA0123
 #define TXN_SM_DEAD 0xFEE1DEAD
 #define TXN_SM_ZERO 0x00001111
+
+
+
+
 
 /* The Txn State Machine */
 typedef struct _TxnSM {
@@ -125,8 +129,112 @@ char* get_http_header_field_value(char* http_header,char* header_field_name);
 char** get_http_request_info(char* cilent_request);
 int get_header_length(char http_response[]);
 
+//............................................................
+//............................................................
+int get_num_url(char *total_url);
+void parsing_request_all_URL(char *server_respone,char *result_parsing_url);
+void parsing_request_one_URL(char *k,char *one_url);
+
+//thread 編號
+struct thread_data {
+    long thread_id;		//thread編號
+    char thread_filename[200];		//欲請求的檔案
+    long thread_portno;				//port
+	char thread_server_response[1000000];	//存server response用
+	long thread_response_byte_read;			//存server response size
+	char server_IP[20];						//要發送request的serverIP
+};
+
+
+
+void* connectSocket(void* information) {
+   long ID = ((struct thread_data*) information) -> thread_id;			//thread編號
+   char *filename=((struct thread_data*) information) ->thread_filename;	//準備要請求的路徑和檔名
+   char *server_name=((struct thread_data*) information) ->server_IP;
+   
+   int n,sockfd,bytes_read;
+   char buffer[1024];				//暫存部分response
+	struct sockaddr_in serv_addr;  //用來保存socket資訊的資料結構
+	struct hostent *server; 	// server :存server用
+	
+	//宣告request 資料
+	char *request = (char *)malloc(sizeof(char) * (MAX_REQUEST_LENGTH + 1));  
+	memset(request, '\0', (sizeof(char) * (MAX_REQUEST_LENGTH + 1)));
+	
+	//製造request
+	strncat(request ,"GET ",4);
+	strncat(request ,filename,strlen(filename));
+	strncat(request," HTTP/1.1\r\nHost: ",17);
+	strncat(request,server_name,strlen(server_name));
+	strncat(request,"\r\nConnection: close\r\n\r\n",25);
+	
+		
+	
+	//create socket
+	sockfd = socket(AF_INET, SOCK_STREAM, 0);
+	if (sockfd < 0) {
+		printf("thread id is %d",ID);
+		error("ERROR opening socket");
+	}
+	serv_addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+    serv_addr.sin_family = AF_INET;
+    serv_addr.sin_port = htons(80); 
+
+	
+	//建立server資訊
+	server = gethostbyname(server_name);
+	if (server == NULL) {
+		printf("thread id is %d",ID);
+        fprintf(stderr,"ERROR, no such host\n");
+        exit(0);
+    }
+	
+	bcopy((char *)server->h_addr, (char *)&serv_addr.sin_addr.s_addr, server->h_length);
+	//建立連線
+	if(connect(sockfd,(struct sockaddr *) &serv_addr,sizeof(serv_addr)) < 0)
+			error("connect failed. Error");
+	
+	//送出request
+	n= write(sockfd,request,strlen(request));
+	if(n<0)
+		error("ERROR writing to socket");
+   
+   TSDebug("HTTP_plugin", "%s\n\n",request);
+   TSDebug("HTTP_plugin", "%d begin ",ID);
+    bytes_read=0;
+	//接收response
+	do{
+			bzero(buffer,1024);
+			n = read(sockfd,buffer,1024);
+			memcpy(((struct thread_data*) information)->thread_server_response+bytes_read,buffer,n);
+			bytes_read = bytes_read + n;
+		
+		}while(n > 0);
+	//關閉socket
+		close(sockfd);
+	TSDebug("HTTP_plugin", "%d socket finish ",ID);		//接收完即顯示哪個做完
+   
+   
+  
+    return 0;
+}
+
+
+
 /* Continuation handler is a function pointer, this function
    is to assign the continuation handler to a specific function. */
+int get_response_size(char *k)
+{
+	int i=0 ,sum=0;
+	while(k[i]!='\0')
+	{
+		i++;
+		if(i==2024000000)
+			break;
+	}
+	return i;
+}   
+ 
 int
 main_handler(TSCont contp, TSEvent event, void *data)
 {
@@ -283,7 +391,6 @@ state_read_request_from_client(TSCont contp, TSEvent event, TSVIO vio ATS_UNUSED
     if (bytes_read > 0) {	//bytes_read大於0,表示buffer有效,有資料存在
 		FILE *fPtr;
 		char *buffer = malloc(1024);
-		//txn_sm->q_server_name = "\0";
 		fPtr = fopen("/srv/datavol/cdn/host.conf", "r");
 		if (fPtr) {
 			TSDebug("HTTP_plugin", "*************************************************************************************************************************open file successfully");
@@ -572,9 +679,9 @@ state_dns_lookup(TSCont contp, TSEvent event, TSHostLookupResult host_info)
       TSError("[protocol] Fail to write into log");
   
   /* Can't find the server IP. */
-  if (event != TS_EVENT_HOST_LOOKUP || !host_info) {
+/*  if (event != TS_EVENT_HOST_LOOKUP || !host_info) {
     return prepare_to_die(contp);
-  }
+  }*/
   txn_sm->q_pending_action = NULL;
 
   /* Get the server IP from data structure TSHostLookupResult. */
@@ -605,11 +712,8 @@ state_dns_lookup(TSCont contp, TSEvent event, TSHostLookupResult host_info)
         TSDebug("HTTP_plugin", "ERROR writing to socket");
 	
 	char buffer[1024]; 
-	char *http_header_end_ptr=NULL;
-    char http_response[104857600]; 
+    char http_response[2024000000]; 
 	int bytes_read=0;
-    char *content_length_ptr = NULL; 
-	int remain_bytes;
     n = 1;
 	
     ret_val = TSTextLogObjectWrite(protocol_plugin_log, "Download file from original server");
@@ -617,45 +721,72 @@ state_dns_lookup(TSCont contp, TSEvent event, TSHostLookupResult host_info)
     if (ret_val != TS_SUCCESS)
       TSError("[protocol] Fail to write into log");
   
-    while(n>0 && !http_header_end_ptr){
-    	bzero(buffer,1024);
-    	n = read(sockfd,buffer,1024);
-		memcpy(http_response+bytes_read,buffer,n);
-		bytes_read = bytes_read + n;    	
-    	http_header_end_ptr = strstr(buffer,"\r\n\r\n");
-		
-    }
-			
-    if(http_header_end_ptr != NULL)
-	{
-		int header_length = get_header_length(http_response);
-		
-        content_length_ptr = strstr(http_response,"Content-Length");
-		char *content_length_temp = malloc(sizeof(char)*11);
-		memcpy(content_length_temp,content_length_ptr+16,strcspn(content_length_ptr,"\r")-16);
-		int content_length = atoi(content_length_temp);
-		free(content_length_temp);
-		int all_response_size = content_length + header_length;
-		
-		remain_bytes = content_length - strlen(http_header_end_ptr+4);
-		TSDebug("HTTP_plugin","content_length is %d",content_length);
-		
-		int content_bytes_read = strlen(http_header_end_ptr+4);
 		do{
 			bzero(buffer,1024);
 			n = read(sockfd,buffer,1024);
 			memcpy(http_response+bytes_read,buffer,n);
 			bytes_read = bytes_read + n;
-			content_bytes_read = content_bytes_read + strlen(buffer);
-			remain_bytes = remain_bytes - strlen(buffer);
-			TSDebug("HTTP_plugin","\n remain_bytes is %d,bytes_read is %d,content_bytes_read is %d,n is %d",remain_bytes,bytes_read,content_bytes_read,n);
-		}while(n > 0);
 		
+		}while(n > 0);
 		close(sockfd);
+
 		int bytes_size;
-		TSIOBufferWrite(txn_sm->q_server_response_buffer, http_response, all_response_size);
+		
+		TSIOBufferWrite(txn_sm->q_server_response_buffer, http_response, bytes_read);
 		bytes_size = TSIOBufferReaderAvail(txn_sm->q_cache_response_buffer_reader);
-		TSDebug("HTTP_plugin","all_response_size is %d , bytes_size is %d",all_response_size,bytes_size);
+	TSDebug("HTTP_plugin","first successful,response is\n %s",http_response);	
+	//...........................................................
+	//..............................................
+		int url_num,thread;
+		char url_parsed[100][200];
+		char ori_server[2][20]={"www.cwb.gov.tw","www.cwb.gov.tw"};
+		
+		parsing_request_all_URL(http_response,url_parsed);
+		url_num=get_num_url(url_parsed);
+		
+		printf("url_num=%d\n",url_num);
+		
+		struct thread_data* thread_array = malloc(url_num * sizeof(struct thread_data));  //建立thread_count個thread_data 結構
+		pthread_t* thread_handles = malloc(url_num * sizeof(pthread_t));  //建立thread_count個thread
+		
+	
+	
+		for (thread=0; thread<url_num ; thread++) //存資料到結構並啟動thread
+		{						
+			thread_array[thread].thread_id = thread;							//定義thread編號
+			thread_array[thread]. thread_portno= 80;							//設port
+			
+			strcpy( thread_array[thread].thread_filename , url_parsed[thread]);	//儲存要請求檔案和路徑
+			strcpy( thread_array[thread].server_IP , ori_server[thread%2]);		//要發送request的serverIP	
+			
+			pthread_create(&thread_handles[thread], NULL, connectSocket, (void*) &thread_array[thread]);   //啟動thread
+		
+			printf("%d build socket successful \n",thread);
+		}
+		
+		
+		
+		
+		for(thread = 0; thread < url_num; thread++){			//合流，跑完thread才能繼續往下執行
+			if (pthread_join(thread_handles[thread], NULL) != 0)
+			{
+				return EXIT_FAILURE;
+			}
+		}
+		int i=0;
+		
+		for(thread = 0; thread < url_num; thread++){			
+			printf("%d response header is\n",thread);
+			for(i=0;i<=200;i++)
+				printf("%c",thread_array[thread].thread_server_response[i]);
+			printf("\n\n\n");
+		}
+	
+	
+	
+	
+		
+		TSDebug("HTTP_plugin","all_response_size is %d , bytes_size is %d",bytes_read,bytes_size);
 		set_handler(txn_sm->q_current_handler, (TxnSMHandler)&state_interface_with_server);
 		txn_sm->q_cache_write_vio = TSVConnWrite(txn_sm->q_cache_vc, contp, txn_sm->q_cache_response_buffer_reader, bytes_size);
 
@@ -663,10 +794,15 @@ state_dns_lookup(TSCont contp, TSEvent event, TSHostLookupResult host_info)
 
 		if (ret_val != TS_SUCCESS)
 		  TSError("[protocol] Fail to write into log");
-	}
+	//}
     
+	
+	
 	TSDebug("HTTP_plugin", "end");
     
+	
+	
+	
   //custom end
   
   //txn_sm->q_pending_action = TSNetConnect(contp, (struct sockaddr const *)&ip_addr);
@@ -1227,4 +1363,68 @@ int get_header_length(char http_response[]){
 	total_length += 2;//加入結尾(\r\n)
 	
 	return total_length;
+}
+
+
+
+int get_num_url(char *total_url)
+	{
+		int num=0, sum=0;
+		while(*(total_url+sum)=='/')
+		{
+			sum+=200;
+			num++;
+		}
+	return num;
+	}
+	
+void parsing_request_one_URL(char *k,char *one_url)
+{
+	char *front_ptr_url,*end_ptr_url;
+	char *src_double_quotes="src=\"/";
+	char *src_apostrophe="src='/";
+		
+	if(strncmp(k,src_double_quotes,6)==0)
+		{
+			front_ptr_url=strstr(k,"=\"");
+			front_ptr_url+=2;
+			end_ptr_url=strchr(front_ptr_url,'\"');
+			memcpy(one_url,front_ptr_url,end_ptr_url-front_ptr_url);
+		}
+		
+	else if(strncmp(k,src_apostrophe,6)==0)
+		{
+			front_ptr_url=strstr(k,"='");
+			front_ptr_url+=2;
+			end_ptr_url=strchr(front_ptr_url,'\'');
+			memcpy(one_url,front_ptr_url,end_ptr_url-front_ptr_url);
+		}	
+}
+void parsing_request_all_URL(char *server_respone,char *result_parsing_url)
+{
+	int count=0;
+	char *front_ptr_url;
+	   
+	char *src_double_quotes="src=\"/";
+	char *src_apostrophe="src='/";
+	
+	
+	front_ptr_url=strstr(server_respone,src_double_quotes);			
+	while(front_ptr_url!=NULL){  
+	
+		parsing_request_one_URL(front_ptr_url,&result_parsing_url[count]);
+		count+=200;                    //二維陣列,前往下一個二微陣列 
+		front_ptr_url+=1;
+		front_ptr_url=strstr(front_ptr_url,src_double_quotes);
+	}
+	
+	front_ptr_url=strstr(server_respone,src_apostrophe);			
+	while(front_ptr_url!=NULL){
+		parsing_request_one_URL(front_ptr_url,&result_parsing_url[count]);
+		count+=200; 
+		front_ptr_url+=1;
+		front_ptr_url=strstr(front_ptr_url,src_apostrophe);
+	}
+	
+
 }
