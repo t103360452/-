@@ -142,7 +142,7 @@ int get_header_length(char http_response[]);
 //............................................................
 int jesse_test_write_complete(TSCont contp, TSEvent event, TSVIO vio);
 int jeese_test(TSCont contp, TSEvent event, TSVConn vc);
-
+int jesse_interface_with_server(TSCont contp, TSEvent event, void *data);
 void parsing_request_one_URL(char *k,char *one_url);
 	/*用途: 給 parsing_request_all_URL用的，只解析1組網址
 		 char *k  :要被解析出網址的陣列 ,資料型態:一維陣列
@@ -410,10 +410,12 @@ state_read_request_from_client(TSCont contp, TSEvent event, TSVIO vio ATS_UNUSED
 	  TSError("[protocol] Fail to write into log");
     if (bytes_read > 0) {	//bytes_read大於0,表示buffer有效,有資料存在
 		FILE *fPtr;
-		char *buffer = malloc(1024);
+		char *buffer ;
+		buffer=(char*)malloc(sizeof(char)*1024);
+	
 		fPtr = fopen("/srv/datavol/cdn/host.conf", "r");
 		if (fPtr) {
-			TSDebug("HTTP_plugin", "**************************open file successfully");
+			TSDebug("HTTP_plugin", "open servername file successfully");
 			fread(buffer, 1, 1024, fPtr);
 			
 			fclose(fPtr);
@@ -421,11 +423,11 @@ state_read_request_from_client(TSCont contp, TSEvent event, TSVIO vio ATS_UNUSED
 		else {
 			TSDebug("HTTP_plugin", "open file failed");
 		}
-		TSDebug("HTTP_plugin", "1");
 		strncpy(txn_sm->q_server_name,buffer,strcspn(buffer,"\n"));
-		TSDebug("HTTP_plugin", "2");
 		free(buffer);
-		TSDebug("HTTP_plugin","%s",txn_sm->q_server_name);
+		txn_sm->q_server_name="www.cwb.gov.tw/";
+		TSDebug("HTTP_plugin","server name is= %s",txn_sm->q_server_name);
+		
 		//↓取得client request buffer的資料，並存成可讀取的char格式。
 		temp_buf = (char *)get_info_from_buffer(txn_sm->q_client_request_buffer_reader); 
       	
@@ -674,16 +676,146 @@ state_build_and_send_request(TSCont contp, TSEvent event ATS_UNUSED, void *data 
   /* Marshal request */
   TSIOBufferWrite(txn_sm->q_server_request_buffer, txn_sm->q_client_request, strlen(txn_sm->q_client_request));
   TSDebug("HTTP_plugin","server name is %s",txn_sm->q_server_name);
+  
+  	//**************************************//
+	//**************************************//
+	//**************************************//
+	//**************************************//
+	
+  
+  
+  return jesse_interface_with_server(contp, 0, NULL);
   /* First thing to do is to get the server IP from the server host name. */
-  set_handler(txn_sm->q_current_handler, (TxnSMHandler)&state_dns_lookup);
+  /*set_handler(txn_sm->q_current_handler, (TxnSMHandler)&state_dns_lookup);
   TSAssert(txn_sm->q_pending_action == NULL);
   txn_sm->q_pending_action = TSHostLookup(contp, txn_sm->q_server_name, strlen(txn_sm->q_server_name));
 
   TSAssert(txn_sm->q_pending_action);
-  TSDebug("HTTP_plugin", "initiating host lookup");
+  TSDebug("HTTP_plugin", "initiating host lookup");*/
 
-  return TS_SUCCESS;
+  
 }
+
+int 
+jesse_interface_with_server(TSCont contp, TSEvent event ATS_UNUSED, void *data ATS_UNUSED)
+{
+	TxnSM *txn_sm = (TxnSM *)TSContDataGet(contp);
+	TSDebug("HTTP_plugin","enter jesse_interface_with_server");
+	
+	int n,sockfd;		
+	struct sockaddr_in serv_addr;   //用來保存socket資訊的資料結構
+	struct hostent *server; 	    // server :存server用
+	
+	char buffer[1024]; 		//暫存部分response
+    char http_response[655360];   //最大存5MB
+	int bytes_read=0;
+	int IOBuffer_size;
+    n = 1;
+	char *http_header_end_ptr=NULL;
+	char *content_length_ptr = NULL; 
+	
+	
+	//create socket
+	sockfd = socket(AF_INET, SOCK_STREAM, 0);
+	if (sockfd < 0) {
+		TSError("ERROR opening socket");
+	}
+	serv_addr.sin_family = AF_INET;
+    serv_addr.sin_port = htons(txn_sm->q_server_port); 
+  
+	//建立server資訊
+	server = gethostbyname(txn_sm->q_server_name);
+	if (server == NULL) {
+        fprintf(stderr,"ERROR, no such host\n");
+        exit(0);
+    }
+	bcopy((char *)server->h_addr, (char *)&serv_addr.sin_addr.s_addr, server->h_length);
+	
+	//建立連線
+	if(connect(sockfd,(struct sockaddr *) &serv_addr,sizeof(serv_addr)) < 0)
+			TSError("connect failed. Error");
+	
+	//送出request
+	n = write(sockfd,txn_sm->q_client_request,strlen(txn_sm->q_client_request));
+	if (n < 0) 
+        TSDebug("HTTP_plugin", "ERROR writing to socket");
+	//接收server-response
+	
+	while(n>0 && !http_header_end_ptr){
+    	bzero(buffer,1024);
+    	n = read(sockfd,buffer,1024);
+		memcpy(http_response+bytes_read,buffer,n);
+		bytes_read = bytes_read + n;    	
+    	http_header_end_ptr = strstr(buffer,"\r\n\r\n");
+    }
+		
+    if(http_header_end_ptr != NULL)
+	{	TSDebug("HTTP_plugin","enter 3");
+		int header_length = get_header_length(http_response);
+		
+        content_length_ptr = strstr(http_response,"Content-Length");
+		if( content_length_ptr!= NULL)
+		{
+			char *content_length_temp = malloc(sizeof(char)*11);
+			memcpy(content_length_temp,content_length_ptr+16,strcspn(content_length_ptr,"\r")-16);
+			int content_length = atoi(content_length_temp);
+			free(content_length_temp);
+			
+			int all_response_size = content_length + header_length;
+			do{
+				bzero(buffer,1024);
+				n = read(sockfd,buffer,1024);
+				memcpy(http_response+bytes_read,buffer,n);
+				bytes_read = bytes_read + n;
+			
+				}while(n > 0);
+			
+			close(sockfd);
+			TSIOBufferWrite(txn_sm->q_server_response_buffer, http_response, all_response_size);
+			IOBuffer_size = TSIOBufferReaderAvail(txn_sm->q_cache_response_buffer_reader);
+		}
+		else{
+			do{
+				bzero(buffer,1024);
+				n = read(sockfd,buffer,1024);
+				memcpy(http_response+bytes_read,buffer,n);
+				bytes_read = bytes_read + n;
+				}while(n > 0);
+			close(sockfd);
+			TSIOBufferWrite(txn_sm->q_server_response_buffer, http_response, bytes_read);
+			IOBuffer_size = TSIOBufferReaderAvail(txn_sm->q_cache_response_buffer_reader);
+			
+		}
+		
+
+	}
+	else
+	{
+	
+		close(sockfd);
+		TSIOBufferWrite(txn_sm->q_server_response_buffer, http_response, bytes_read);
+		IOBuffer_size = TSIOBufferReaderAvail(txn_sm->q_cache_response_buffer_reader);
+	}
+	
+	TSDebug("HTTP_plugin", "end receive");	
+	set_handler(txn_sm->q_current_handler, (TxnSMHandler)&state_interface_with_server);
+	txn_sm->q_cache_write_vio = TSVConnWrite(txn_sm->q_cache_vc, contp, txn_sm->q_cache_response_buffer_reader, IOBuffer_size);
+
+		
+		
+		
+	//紀錄解析了幾個url
+	txn_sm->number=0;
+	//初始化
+	txn_sm->count=0;
+//	set_handler(txn_sm->q_current_handler, (TxnSMHandler)&state_interface_with_server);
+//	txn_sm->q_cache_write_vio = TSVConnWrite(txn_sm->q_cache_vc, contp, txn_sm->q_cache_response_buffer_reader, bytes_size);
+  	
+  
+  TSDebug("HTTP_plugin","jesse successfully");
+	return TS_SUCCESS;
+}
+
 
 /* If Host lookup is successfully, connect to that IP. */
 int
@@ -1298,7 +1430,7 @@ state_done(TSCont contp, TSEvent event ATS_UNUSED, TSVIO vio ATS_UNUSED)
 
   TSDebug("HTTP_plugin", "jesse enter state_done");
 
-  if(txn_sm->server_response != NULL)
+/*  if(txn_sm->server_response != NULL)
   {
 	TSDebug("HTTP_plugin", "jesse enter free server_response");
 	free(txn_sm->server_response);
@@ -1314,7 +1446,7 @@ state_done(TSCont contp, TSEvent event ATS_UNUSED, TSVIO vio ATS_UNUSED)
   {
 	TSDebug("HTTP_plugin", "jesse enter free response_byte_read");
 	free(txn_sm->response_byte_read);
-  }
+  }*/
   
   if (txn_sm->q_pending_action && !TSActionDone(txn_sm->q_pending_action)) {
     TSDebug("HTTP_plugin", "cancelling pending action %p", txn_sm->q_pending_action);
