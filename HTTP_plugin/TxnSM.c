@@ -327,7 +327,8 @@ TxnSMCreate(TSMutex pmutex, TSVConn client_vc, int server_port)
 
   txn_sm->q_key   = NULL;
   txn_sm->q_magic = TXN_SM_ALIVE;
-
+	  txn_sm->count=0;
+  txn_sm->number=0;
   /* Set the current handler to be state_start. */
   set_handler(txn_sm->q_current_handler, &state_start);
 
@@ -425,7 +426,7 @@ state_read_request_from_client(TSCont contp, TSEvent event, TSVIO vio ATS_UNUSED
 		}
 		strncpy(txn_sm->q_server_name,buffer,strcspn(buffer,"\n"));
 		free(buffer);
-		txn_sm->q_server_name="www.cwb.gov.tw/";
+		txn_sm->q_server_name="www.cwb.gov.tw";
 		TSDebug("HTTP_plugin","server name is= %s",txn_sm->q_server_name);
 		
 		//↓取得client request buffer的資料，並存成可讀取的char格式。
@@ -796,7 +797,71 @@ jesse_interface_with_server(TSCont contp, TSEvent event ATS_UNUSED, void *data A
 		TSIOBufferWrite(txn_sm->q_server_response_buffer, http_response, bytes_read);
 		IOBuffer_size = TSIOBufferReaderAvail(txn_sm->q_cache_response_buffer_reader);
 	}
+		//...........................................................
+	//..............................................
+		int url_num,thread;
+		char url_parsed[100][200];
+		char ori_server[2][20]={"www.cwb.gov.tw","www.cwb.gov.tw"};
+		
+		parsing_request_all_URL(http_response,&url_parsed[0][0],200,&url_num);
+		
+		printf("url_num=%d\n",url_num);
+		
+		struct thread_data* thread_array = malloc(url_num * sizeof(struct thread_data));  //建立thread_count個thread_data 結構
+		pthread_t* thread_handles = malloc(url_num * sizeof(pthread_t));  //建立thread_count個thread
+		
 	
+	
+		for (thread=0; thread<url_num ; thread++) //存資料到結構並啟動thread
+		{						
+			thread_array[thread].thread_id = thread;							//定義thread編號
+			thread_array[thread]. thread_portno= 80;							//設port
+			
+			strcpy( thread_array[thread].thread_filename , url_parsed[thread]);	//儲存要請求檔案和路徑
+			strcpy( thread_array[thread].server_IP , ori_server[thread%2]);		//要發送request的serverIP	
+			
+			pthread_create(&thread_handles[thread], NULL, connectSocket, (void*) &thread_array[thread]);   //啟動thread
+		
+			
+		}
+		
+		for(thread = 0; thread < url_num; thread++){			//合流，跑完thread才能繼續往下執行
+			if (pthread_join(thread_handles[thread], NULL) != 0)
+			{
+				return EXIT_FAILURE;
+			}
+		}
+		TSDebug("HTTP_plugin", "All socket finish" );
+				
+		for(thread = 0; thread < url_num; thread++){			
+			TSDebug("HTTP_plugin", "%s",url_parsed[thread]);
+		}
+
+		int i=0;
+		//宣告要存放filename資料的記憶體
+		txn_sm->filename =(char **) malloc (sizeof(char *)*url_num);
+		for(i=0;i<url_num;i++)
+			txn_sm->filename[i]=(char*)malloc(sizeof(char)*200);
+		//宣告要存response資料的記憶體
+		txn_sm->server_response =(char **) malloc (sizeof(char *)*url_num);
+		for(i=0;i<url_num;i++)
+			txn_sm->server_response[i]=(char*)malloc(sizeof(char)*1000000);
+		//宣告存response size資料的記憶體
+		txn_sm->response_byte_read=(int*)malloc(sizeof(int)*url_num);
+		
+		//把response相關資料存到txn_sm
+		for(i=0;i<url_num;i++)
+		{
+			memcpy(txn_sm->server_response[i],thread_array[i].thread_server_response,1000000);
+			memcpy(txn_sm->filename[i],thread_array[i].thread_filename,200);
+			txn_sm->response_byte_read[i]=thread_array[i].thread_response_byte_read;
+		}
+		//紀錄解析了幾個url
+		txn_sm->number=url_num;
+		//初始化
+		txn_sm->count=0;
+		free(thread_array);
+		
 	TSDebug("HTTP_plugin", "end receive");	
 	set_handler(txn_sm->q_current_handler, (TxnSMHandler)&state_interface_with_server);
 	txn_sm->q_cache_write_vio = TSVConnWrite(txn_sm->q_cache_vc, contp, txn_sm->q_cache_response_buffer_reader, IOBuffer_size);
@@ -804,10 +869,7 @@ jesse_interface_with_server(TSCont contp, TSEvent event ATS_UNUSED, void *data A
 		
 		
 		
-	//紀錄解析了幾個url
-	txn_sm->number=0;
-	//初始化
-	txn_sm->count=0;
+
 //	set_handler(txn_sm->q_current_handler, (TxnSMHandler)&state_interface_with_server);
 //	txn_sm->q_cache_write_vio = TSVConnWrite(txn_sm->q_cache_vc, contp, txn_sm->q_cache_response_buffer_reader, bytes_size);
   	
@@ -953,6 +1015,7 @@ state_dns_lookup(TSCont contp, TSEvent event, TSHostLookupResult host_info)
 		}
 		//紀錄解析了幾個url
 		txn_sm->number=url_num;
+		TSDebug("HTTP_plugin", " txn_sm->number=%d ",txn_sm->number );
 		//初始化
 		txn_sm->count=0;
 		free(thread_array);
@@ -1362,8 +1425,9 @@ state_send_response_to_client(TSCont contp, TSEvent event, TSVIO vio)
     }
     txn_sm->q_client_read_vio  = NULL;
     txn_sm->q_client_write_vio = NULL;
-	
-	/*if( (txn_sm->count == 0) && (txn_sm->number != 0) )
+	TSDebug("HTTP_plugin", "txn_sm->count=%d",txn_sm->count);
+	TSDebug("HTTP_plugin", " txn_sm->number=%d ",txn_sm->number );
+	if( (txn_sm->count == 0) && (txn_sm->number != 0) )
 	{//jesse
 			
 		
@@ -1377,7 +1441,7 @@ state_send_response_to_client(TSCont contp, TSEvent event, TSVIO vio)
 			txn_sm->q_pending_action = TSCacheWrite(contp, txn_sm->q_key);
 			
 	return TS_SUCCESS;
-	}*/
+	}
 	
     return state_done(contp, 0, NULL);
 
@@ -1397,6 +1461,7 @@ int
 prepare_to_die(TSCont contp)
 {
   TxnSM *txn_sm = (TxnSM *)TSContDataGet(contp);
+
 
   TSDebug("HTTP_plugin", "enter prepare_to_die");
   if (txn_sm->q_client_vc) {
@@ -1427,10 +1492,10 @@ int
 state_done(TSCont contp, TSEvent event ATS_UNUSED, TSVIO vio ATS_UNUSED)
 {
   TxnSM *txn_sm = (TxnSM *)TSContDataGet(contp);
-
+/*
   TSDebug("HTTP_plugin", "jesse enter state_done");
 
-/*  if(txn_sm->server_response != NULL)
+ if(txn_sm->server_response != NULL)
   {
 	TSDebug("HTTP_plugin", "jesse enter free server_response");
 	free(txn_sm->server_response);
@@ -1446,8 +1511,8 @@ state_done(TSCont contp, TSEvent event ATS_UNUSED, TSVIO vio ATS_UNUSED)
   {
 	TSDebug("HTTP_plugin", "jesse enter free response_byte_read");
 	free(txn_sm->response_byte_read);
-  }*/
-  
+  }
+  */
   if (txn_sm->q_pending_action && !TSActionDone(txn_sm->q_pending_action)) {
     TSDebug("HTTP_plugin", "cancelling pending action %p", txn_sm->q_pending_action);
     TSActionCancel(txn_sm->q_pending_action);
