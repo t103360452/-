@@ -794,7 +794,7 @@ state_dns_lookup(TSCont contp, TSEvent event, TSHostLookupResult host_info)
 				return EXIT_FAILURE;
 			}
 		}
-		TSDebug("All socket finish", );
+		TSDebug("HTTP_plugin", "All socket finish" );
 				
 		for(thread = 0; thread < url_num; thread++){			
 			TSDebug("HTTP_plugin", "%s",url_parsed[thread]);
