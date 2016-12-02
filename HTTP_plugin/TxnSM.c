@@ -117,7 +117,6 @@ int state_write_to_cache(TSCont contp, TSEvent event, TSVIO vio);
 
 /* functions for servers */
 int state_build_and_send_request(TSCont contp, TSEvent event, void *data);
-int state_dns_lookup(TSCont contp, TSEvent event, TSHostLookupResult host_info);
 int state_connect_to_server(TSCont contp, TSEvent event, TSVConn vc);
 int state_interface_with_server(TSCont contp, TSEvent event, TSVIO vio);
 int state_send_request_to_server(TSCont contp, TSEvent event, TSVIO vio);
@@ -142,7 +141,8 @@ int get_header_length(char http_response[]);
 //............................................................
 int jesse_test_write_complete(TSCont contp, TSEvent event, TSVIO vio);
 int jeese_test(TSCont contp, TSEvent event, TSVConn vc);
-int jesse_interface_with_server(TSCont contp, TSEvent event, void *data);
+int begin_transmission_with_server(TSCont contp, TSEvent event, void *data);
+int parse_url_and_send_request_use_pthread(TSCont contp, TSEvent event, void *data);
 void parsing_request_one_URL(char *k,char *one_url);
 	/*用途: 給 parsing_request_all_URL用的，只解析1組網址
 		 char *k  :要被解析出網址的陣列 ,資料型態:一維陣列
@@ -243,17 +243,6 @@ void* connectSocket(void* information) {
 
 /* Continuation handler is a function pointer, this function
    is to assign the continuation handler to a specific function. */
-int get_response_size(char *k)
-{
-	int i=0;
-	while(k[i]!='\0')
-	{
-		i++;
-		if(i==2024000000)
-			break;
-	}
-	return i;
-}   
  
 int
 main_handler(TSCont contp, TSEvent event, void *data)
@@ -327,7 +316,7 @@ TxnSMCreate(TSMutex pmutex, TSVConn client_vc, int server_port)
 
   txn_sm->q_key   = NULL;
   txn_sm->q_magic = TXN_SM_ALIVE;
-	  txn_sm->count=0;
+  txn_sm->count=0;
   txn_sm->number=0;
   /* Set the current handler to be state_start. */
   set_handler(txn_sm->q_current_handler, &state_start);
@@ -678,30 +667,22 @@ state_build_and_send_request(TSCont contp, TSEvent event ATS_UNUSED, void *data 
   TSIOBufferWrite(txn_sm->q_server_request_buffer, txn_sm->q_client_request, strlen(txn_sm->q_client_request));
   TSDebug("HTTP_plugin","server name is %s",txn_sm->q_server_name);
   
-  	//**************************************//
-	//**************************************//
-	//**************************************//
-	//**************************************//
-	
   
   
-  return jesse_interface_with_server(contp, 0, NULL);
-  /* First thing to do is to get the server IP from the server host name. */
-  /*set_handler(txn_sm->q_current_handler, (TxnSMHandler)&state_dns_lookup);
-  TSAssert(txn_sm->q_pending_action == NULL);
-  txn_sm->q_pending_action = TSHostLookup(contp, txn_sm->q_server_name, strlen(txn_sm->q_server_name));
-
-  TSAssert(txn_sm->q_pending_action);
-  TSDebug("HTTP_plugin", "initiating host lookup");*/
+  
+  return begin_transmission_with_server(contp, 0, NULL);
+  
 
   
 }
 
 int 
-jesse_interface_with_server(TSCont contp, TSEvent event ATS_UNUSED, void *data ATS_UNUSED)
-{
+begin_transmission_with_server(TSCont contp, TSEvent event ATS_UNUSED, void *data ATS_UNUSED)
+{//以下為用HTTP請求和server要資料
+	
+	
 	TxnSM *txn_sm = (TxnSM *)TSContDataGet(contp);
-	TSDebug("HTTP_plugin","enter jesse_interface_with_server");
+	TSDebug("HTTP_plugin","enter begin_transmission_with_server");
 	
 	int n,sockfd;		
 	struct sockaddr_in serv_addr;   //用來保存socket資訊的資料結構
@@ -797,252 +778,94 @@ jesse_interface_with_server(TSCont contp, TSEvent event ATS_UNUSED, void *data A
 		TSIOBufferWrite(txn_sm->q_server_response_buffer, http_response, bytes_read);
 		IOBuffer_size = TSIOBufferReaderAvail(txn_sm->q_cache_response_buffer_reader);
 	}
-		//...........................................................
-	//..............................................
-		int url_num,thread;
-		char url_parsed[100][200];
+	//解析response
+	int i;
+	char url_parsed[100][200];
+	parsing_request_all_URL(http_response,&url_parsed[0][0],200,&txn_sm->number);
+	
+	//宣告要存放filename資料的記憶體,並存filename
+		txn_sm->filename =(char **) malloc (sizeof(char *)*txn_sm->number);
+		for(i=0;i<txn_sm->number;i++)
+		{
+			txn_sm->filename[i]=(char*)malloc(sizeof(char)*200);
+			memcpy(txn_sm->filename[i],url_parsed[i],200);
+		}
+	
+	return parse_url_and_send_request_use_pthread(contp, 0, NULL);
+}
+
+int
+parse_url_and_send_request_use_pthread(TSCont contp, TSEvent event ATS_UNUSED, void *data ATS_UNUSED)
+{
+		TxnSM *txn_sm = (TxnSM *)TSContDataGet(contp);
+		TSDebug("HTTP_plugin","enter parse_url_and_send_request_use_pthread");
+		int thread;
 		char ori_server[2][20]={"www.cwb.gov.tw","www.cwb.gov.tw"};
 		
-		parsing_request_all_URL(http_response,&url_parsed[0][0],200,&url_num);
 		
-		printf("url_num=%d\n",url_num);
-		
-		struct thread_data* thread_array = malloc(url_num * sizeof(struct thread_data));  //建立thread_count個thread_data 結構
-		pthread_t* thread_handles = malloc(url_num * sizeof(pthread_t));  //建立thread_count個thread
+	
+		struct thread_data* thread_array = malloc(txn_sm->number * sizeof(struct thread_data));  //建立txn_sm->number個thread_data 結構
+		pthread_t* thread_handles = malloc(txn_sm->number * sizeof(pthread_t));  //建立txn_sm->number個thread
 		
 	
 	
-		for (thread=0; thread<url_num ; thread++) //存資料到結構並啟動thread
+		for (thread=0; thread<txn_sm->number ; thread++) //存資料到結構並啟動thread
 		{						
 			thread_array[thread].thread_id = thread;							//定義thread編號
 			thread_array[thread]. thread_portno= 80;							//設port
 			
-			strcpy( thread_array[thread].thread_filename , url_parsed[thread]);	//儲存要請求檔案和路徑
+			strcpy( thread_array[thread].thread_filename , txn_sm->filename[thread]);	//儲存要請求檔案和路徑
 			strcpy( thread_array[thread].server_IP , ori_server[thread%2]);		//要發送request的serverIP	
 			
 			pthread_create(&thread_handles[thread], NULL, connectSocket, (void*) &thread_array[thread]);   //啟動thread
 		
 			
 		}
-		
-		for(thread = 0; thread < url_num; thread++){			//合流，跑完thread才能繼續往下執行
+		//合流，跑完thread才能繼續往下執行
+		for(thread = 0; thread < txn_sm->number; thread++){			
 			if (pthread_join(thread_handles[thread], NULL) != 0)
 			{
 				return EXIT_FAILURE;
 			}
 		}
+		
 		TSDebug("HTTP_plugin", "All socket finish" );
 				
-		for(thread = 0; thread < url_num; thread++){			
-			TSDebug("HTTP_plugin", "%s",url_parsed[thread]);
-		}
 
 		int i=0;
-		//宣告要存放filename資料的記憶體
-		txn_sm->filename =(char **) malloc (sizeof(char *)*url_num);
-		for(i=0;i<url_num;i++)
-			txn_sm->filename[i]=(char*)malloc(sizeof(char)*200);
+		
 		//宣告要存response資料的記憶體
-		txn_sm->server_response =(char **) malloc (sizeof(char *)*url_num);
-		for(i=0;i<url_num;i++)
+		txn_sm->server_response =(char **) malloc (sizeof(char *)*txn_sm->number);
+		for(i=0;i<txn_sm->number;i++)
 			txn_sm->server_response[i]=(char*)malloc(sizeof(char)*1000000);
 		//宣告存response size資料的記憶體
-		txn_sm->response_byte_read=(int*)malloc(sizeof(int)*url_num);
+		txn_sm->response_byte_read=(int*)malloc(sizeof(int)*txn_sm->number);
 		
 		//把response相關資料存到txn_sm
-		for(i=0;i<url_num;i++)
+		for(i=0;i<txn_sm->number;i++)
 		{
 			memcpy(txn_sm->server_response[i],thread_array[i].thread_server_response,1000000);
 			memcpy(txn_sm->filename[i],thread_array[i].thread_filename,200);
 			txn_sm->response_byte_read[i]=thread_array[i].thread_response_byte_read;
 		}
-		//紀錄解析了幾個url
-		txn_sm->number=url_num;
+
 		//初始化
 		txn_sm->count=0;
 		free(thread_array);
 		
 	TSDebug("HTTP_plugin", "end receive");	
 	set_handler(txn_sm->q_current_handler, (TxnSMHandler)&state_interface_with_server);
-	txn_sm->q_cache_write_vio = TSVConnWrite(txn_sm->q_cache_vc, contp, txn_sm->q_cache_response_buffer_reader, IOBuffer_size);
+	txn_sm->q_cache_write_vio = TSVConnWrite(txn_sm->q_cache_vc, contp,txn_sm->q_cache_response_buffer_reader, 
+													TSIOBufferReaderAvail(txn_sm->q_cache_response_buffer_reader));
 
 		
-		
-		
-
-//	set_handler(txn_sm->q_current_handler, (TxnSMHandler)&state_interface_with_server);
-//	txn_sm->q_cache_write_vio = TSVConnWrite(txn_sm->q_cache_vc, contp, txn_sm->q_cache_response_buffer_reader, bytes_size);
-  	
+			
   
   TSDebug("HTTP_plugin","jesse successfully");
 	return TS_SUCCESS;
-}
+	}
 
 
-/* If Host lookup is successfully, connect to that IP. */
-int
-state_dns_lookup(TSCont contp, TSEvent event, TSHostLookupResult host_info)
-{
-  TxnSM *txn_sm = (TxnSM *)TSContDataGet(contp);
-  struct sockaddr const *q_server_addr;
-  struct sockaddr_in ip_addr;
-
-  TSDebug("HTTP_plugin", "enter state_dns_lookup");
-  
-    int ret_val = TSTextLogObjectWrite(protocol_plugin_log, "Connect and send request to original server");
-
-    if (ret_val != TS_SUCCESS)
-      TSError("[protocol] Fail to write into log");
-  
-  /* Can't find the server IP. */
-/*  if (event != TS_EVENT_HOST_LOOKUP || !host_info) {
-    return prepare_to_die(contp);
-  }*/
-  txn_sm->q_pending_action = NULL;
-
-  /* Get the server IP from data structure TSHostLookupResult. */
-  q_server_addr = TSHostLookupResultAddrGet(host_info);
-
-  /* Connect to the server using its IP. */
-  //set_handler(txn_sm->q_current_handler, (TxnSMHandler)&state_connect_to_server);
-  TSAssert(txn_sm->q_pending_action == NULL);
-  TSAssert(q_server_addr->sa_family == AF_INET); /* NO IPv6 in this plugin */
-  
-  memcpy(&ip_addr, q_server_addr, sizeof(ip_addr));
-  TSDebug("HTTP_plugin", "enter server port is %d",txn_sm->q_server_port);
-  ip_addr.sin_port         = htons(txn_sm->q_server_port);
-  TSDebug("HTTP_plugin", "IP is %d",ip_addr.sin_addr.s_addr);
-  
-  //custom
-  int sockfd, n;
-  sockfd = socket(AF_INET, SOCK_STREAM, 0);
-	if (sockfd < 0)
-		TSDebug("HTTP_plugin", "ERROR opening socket");
-	
-	if (connect(sockfd,(struct sockaddr const *)&ip_addr,sizeof(ip_addr)) < 0) 
-        TSDebug("HTTP_plugin", "ERROR connecting");
-	
-	n = write(sockfd,txn_sm->q_client_request,strlen(txn_sm->q_client_request));
-	
-    if (n < 0) 
-        TSDebug("HTTP_plugin", "ERROR writing to socket");
-	
-	char buffer[1024]; 
-    char http_response[2024000000]; 
-	int bytes_read=0;
-    n = 1;
-	
-    ret_val = TSTextLogObjectWrite(protocol_plugin_log, "Download file from original server");
-
-    if (ret_val != TS_SUCCESS)
-      TSError("[protocol] Fail to write into log");
-  
-		do{
-			bzero(buffer,1024);
-			n = read(sockfd,buffer,1024);
-			memcpy(http_response+bytes_read,buffer,n);
-			bytes_read = bytes_read + n;
-		
-		}while(n > 0);
-		close(sockfd);
-
-		int bytes_size;
-	//接收完respinse 並存到buffer裡	
-		TSIOBufferWrite(txn_sm->q_server_response_buffer, http_response, bytes_read);
-		bytes_size = TSIOBufferReaderAvail(txn_sm->q_cache_response_buffer_reader);
-	
-	//...........................................................
-	//..............................................
-		int url_num,thread;
-		char url_parsed[100][200];
-		char ori_server[2][20]={"www.cwb.gov.tw","www.cwb.gov.tw"};
-		
-		parsing_request_all_URL(http_response,&url_parsed[0][0],200,&url_num);
-		
-		printf("url_num=%d\n",url_num);
-		
-		struct thread_data* thread_array = malloc(url_num * sizeof(struct thread_data));  //建立thread_count個thread_data 結構
-		pthread_t* thread_handles = malloc(url_num * sizeof(pthread_t));  //建立thread_count個thread
-		
-	
-	
-		for (thread=0; thread<url_num ; thread++) //存資料到結構並啟動thread
-		{						
-			thread_array[thread].thread_id = thread;							//定義thread編號
-			thread_array[thread]. thread_portno= 80;							//設port
-			
-			strcpy( thread_array[thread].thread_filename , url_parsed[thread]);	//儲存要請求檔案和路徑
-			strcpy( thread_array[thread].server_IP , ori_server[thread%2]);		//要發送request的serverIP	
-			
-			pthread_create(&thread_handles[thread], NULL, connectSocket, (void*) &thread_array[thread]);   //啟動thread
-		
-			
-		}
-		
-		
-		
-		
-		for(thread = 0; thread < url_num; thread++){			//合流，跑完thread才能繼續往下執行
-			if (pthread_join(thread_handles[thread], NULL) != 0)
-			{
-				return EXIT_FAILURE;
-			}
-		}
-		TSDebug("HTTP_plugin", "All socket finish" );
-				
-		for(thread = 0; thread < url_num; thread++){			
-			TSDebug("HTTP_plugin", "%s",url_parsed[thread]);
-		}
-
-		int i=0;
-		//宣告要存放filename資料的記憶體
-		txn_sm->filename =(char **) malloc (sizeof(char *)*url_num);
-		for(i=0;i<url_num;i++)
-			txn_sm->filename[i]=(char*)malloc(sizeof(char)*200);
-		//宣告要存response資料的記憶體
-		txn_sm->server_response =(char **) malloc (sizeof(char *)*url_num);
-		for(i=0;i<url_num;i++)
-			txn_sm->server_response[i]=(char*)malloc(sizeof(char)*1000000);
-		//宣告存response size資料的記憶體
-		txn_sm->response_byte_read=(int*)malloc(sizeof(int)*url_num);
-		
-		//把response相關資料存到txn_sm
-		for(i=0;i<url_num;i++)
-		{
-			memcpy(txn_sm->server_response[i],thread_array[i].thread_server_response,1000000);
-			memcpy(txn_sm->filename[i],thread_array[i].thread_filename,200);
-			txn_sm->response_byte_read[i]=thread_array[i].thread_response_byte_read;
-		}
-		//紀錄解析了幾個url
-		txn_sm->number=url_num;
-		TSDebug("HTTP_plugin", " txn_sm->number=%d ",txn_sm->number );
-		//初始化
-		txn_sm->count=0;
-		free(thread_array);
-		//...............................................................//
-	
-		set_handler(txn_sm->q_current_handler, (TxnSMHandler)&state_interface_with_server);
-		txn_sm->q_cache_write_vio = TSVConnWrite(txn_sm->q_cache_vc, contp, txn_sm->q_cache_response_buffer_reader, bytes_size);
-
-		ret_val = TSTextLogObjectWrite(protocol_plugin_log, "Save file to cache");
-
-		if (ret_val != TS_SUCCESS)
-		  TSError("[protocol] Fail to write into log");
-	//}
-    
-	
-	
-	TSDebug("HTTP_plugin", "end");
-    
-	
-	
-	
-  //custom end
-  
-  //txn_sm->q_pending_action = TSNetConnect(contp, (struct sockaddr const *)&ip_addr);
-
-  return TS_SUCCESS;
-}
 
 /* Net Processor calls back, if succeeded, the net_vc is returned.
    Note here, even if the event is TS_EVENT_NET_CONNECT, it doesn't
