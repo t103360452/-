@@ -143,16 +143,13 @@ int jesse_test_write_complete(TSCont contp, TSEvent event, TSVIO vio);
 int jeese_test(TSCont contp, TSEvent event, TSVConn vc);
 int begin_transmission_with_server(TSCont contp, TSEvent event, void *data);
 int parse_url_and_send_request_use_pthread(TSCont contp, TSEvent event, void *data);
-void parsing_request_one_URL(char *k,char *one_url);
-	/*用途: 給 parsing_request_all_URL用的，只解析1組網址
-		 char *k  :要被解析出網址的陣列 ,資料型態:一維陣列
-		 one_url  :解析出來的網址存放在該位址 ,資料型態:一維陣列 
-	 */
-void parsing_request_all_URL(char *server_respone,char *result_parsing_url , int size, int *num);
+
+void parsing_request_all_URL(char *server_respone,char *result_parsing_url , int response_size,int array_size, int *num);
 	/* 用途： 解析網頁裡頭所有相對路徑檔案網址,並計算有幾個 
 		server_respone	: 要被解析出網址的陣列 ,資料型態:一維陣列 
 		result_parsing_url:   把解析出來的網址存放在該位址 ,資料型態:傳入二維陣列的第一個地址 
-		size: 二維陣列中array[i][k]的k的size值
+		response_size: server_respone的大小
+		array_size: 二維陣列中array[i][k]的k的size值
 		num : 把解析出來的網址的數量存放在該位址
 	*/
 
@@ -220,19 +217,72 @@ void* connectSocket(void* information) {
 		TSError("ERROR writing to socket");
    
 
-    bytes_read=0;
+    char *http_header_end_ptr=NULL;
+	char *content_length_ptr=NULL;
+	bytes_read=0;
+
 	//接收response
-	do{
-			bzero(buffer,1024);
-			n = read(sockfd,buffer,1024);
-			memcpy(((struct thread_data*) information)->thread_server_response+bytes_read,buffer,n);
-			bytes_read = bytes_read + n;
-		
-		}while(n > 0);
-	//關閉socket
-		close(sockfd);
-	((struct thread_data*) information) ->thread_response_byte_read = bytes_read;
 	
+	while(n>0 && !http_header_end_ptr){
+    	bzero(buffer,1024);
+    	n = read(sockfd,buffer,1024);
+		memcpy(((struct thread_data*) information)->thread_server_response+bytes_read,buffer,n);
+		bytes_read = bytes_read + n;    	
+    	http_header_end_ptr = strstr(buffer,"\r\n\r\n");
+		
+    }
+		
+    if(http_header_end_ptr != NULL)
+	{	
+		int header_length = get_header_length(((struct thread_data*) information)->thread_server_response);
+		
+        content_length_ptr = strstr(((struct thread_data*) information)->thread_server_response,"Content-Length");
+		if( content_length_ptr!= NULL)
+		{
+			char *content_length_temp = malloc(sizeof(char)*11);
+			memcpy(content_length_temp,content_length_ptr+16,strcspn(content_length_ptr,"\r")-16);
+			int content_length = atoi(content_length_temp);
+			free(content_length_temp);
+			
+			int all_response_size = content_length + header_length;
+			do{
+				bzero(buffer,1024);
+				n = read(sockfd,buffer,1024);
+				memcpy(((struct thread_data*) information)->thread_server_response+bytes_read,buffer,n);
+				bytes_read = bytes_read + n;
+				}while(n > 0);
+			
+			close(sockfd);
+			
+			
+			((struct thread_data*) information) ->thread_response_byte_read = all_response_size;
+		}
+		else{
+			do{
+				bzero(buffer,1024);
+				n = read(sockfd,buffer,1024);
+				memcpy(((struct thread_data*) information)->thread_server_response+bytes_read,buffer,n);
+				bytes_read = bytes_read + n;
+				
+				}while(n > 0);
+			close(sockfd);
+			((struct thread_data*) information) ->thread_response_byte_read = bytes_read;
+			
+			
+		}
+		TSDebug("HTTP_plugin","thread id is %ld is finsih %s",ID,filename);
+
+	}
+	else
+	{
+	
+		close(sockfd);
+		((struct thread_data*) information) ->thread_response_byte_read = bytes_read;
+	}
+	//關閉socket
+	//	close(sockfd);
+	//((struct thread_data*) information) ->thread_response_byte_read = bytes_read;
+	free(request);
    
    
   
@@ -696,7 +746,6 @@ begin_transmission_with_server(TSCont contp, TSEvent event ATS_UNUSED, void *dat
 	char *http_header_end_ptr=NULL;
 	char *content_length_ptr = NULL; 
 	
-	
 	//create socket
 	sockfd = socket(AF_INET, SOCK_STREAM, 0);
 	if (sockfd < 0) {
@@ -732,7 +781,7 @@ begin_transmission_with_server(TSCont contp, TSEvent event ATS_UNUSED, void *dat
     }
 		
     if(http_header_end_ptr != NULL)
-	{	TSDebug("HTTP_plugin","enter 3");
+	{	
 		int header_length = get_header_length(http_response);
 		
         content_length_ptr = strstr(http_response,"Content-Length");
@@ -778,11 +827,17 @@ begin_transmission_with_server(TSCont contp, TSEvent event ATS_UNUSED, void *dat
 		TSIOBufferWrite(txn_sm->q_server_response_buffer, http_response, bytes_read);
 		IOBuffer_size = TSIOBufferReaderAvail(txn_sm->q_cache_response_buffer_reader);
 	}
+	
+	
 	//解析response
+	txn_sm->count=0;
+	txn_sm->number=0;
 	int i;
 	char url_parsed[100][200];
-	parsing_request_all_URL(http_response,&url_parsed[0][0],200,&txn_sm->number);
+	TSDebug("HTTP_plugin","IOBuffer_size = %d",IOBuffer_size);
+	parsing_request_all_URL(http_response,&url_parsed[0][0],IOBuffer_size,200,&txn_sm->number);
 	
+	TSDebug("HTTP_plugin","txn_sm->number = %d",txn_sm->number);
 	//宣告要存放filename資料的記憶體,並存filename
 		txn_sm->filename =(char **) malloc (sizeof(char *)*txn_sm->number);
 		for(i=0;i<txn_sm->number;i++)
@@ -790,7 +845,7 @@ begin_transmission_with_server(TSCont contp, TSEvent event ATS_UNUSED, void *dat
 			txn_sm->filename[i]=(char*)malloc(sizeof(char)*200);
 			memcpy(txn_sm->filename[i],url_parsed[i],200);
 		}
-	
+
 	return parse_url_and_send_request_use_pthread(contp, 0, NULL);
 }
 
@@ -799,18 +854,21 @@ parse_url_and_send_request_use_pthread(TSCont contp, TSEvent event ATS_UNUSED, v
 {
 		TxnSM *txn_sm = (TxnSM *)TSContDataGet(contp);
 		TSDebug("HTTP_plugin","enter parse_url_and_send_request_use_pthread");
+		
 		int thread;
+
 		char ori_server[2][20]={"www.cwb.gov.tw","www.cwb.gov.tw"};
 		
-		
 	
+		
 		struct thread_data* thread_array = malloc(txn_sm->number * sizeof(struct thread_data));  //建立txn_sm->number個thread_data 結構
 		pthread_t* thread_handles = malloc(txn_sm->number * sizeof(pthread_t));  //建立txn_sm->number個thread
 		
-	
+		TSDebug("HTTP_plugin","enter 5");
 	
 		for (thread=0; thread<txn_sm->number ; thread++) //存資料到結構並啟動thread
-		{						
+		{		
+			TSDebug("HTTP_plugin","enter %s create",txn_sm->filename[thread]);
 			thread_array[thread].thread_id = thread;							//定義thread編號
 			thread_array[thread]. thread_portno= 80;							//設port
 			
@@ -821,8 +879,9 @@ parse_url_and_send_request_use_pthread(TSCont contp, TSEvent event ATS_UNUSED, v
 		
 			
 		}
+		
 		//合流，跑完thread才能繼續往下執行
-		for(thread = 0; thread < txn_sm->number; thread++){			
+		for(thread = 0; thread < txn_sm->number; thread++){
 			if (pthread_join(thread_handles[thread], NULL) != 0)
 			{
 				return EXIT_FAILURE;
@@ -837,14 +896,15 @@ parse_url_and_send_request_use_pthread(TSCont contp, TSEvent event ATS_UNUSED, v
 		//宣告要存response資料的記憶體
 		txn_sm->server_response =(char **) malloc (sizeof(char *)*txn_sm->number);
 		for(i=0;i<txn_sm->number;i++)
-			txn_sm->server_response[i]=(char*)malloc(sizeof(char)*1000000);
+			txn_sm->server_response[i]=(char*)malloc(sizeof(char)*65535);
+		
 		//宣告存response size資料的記憶體
 		txn_sm->response_byte_read=(int*)malloc(sizeof(int)*txn_sm->number);
 		
 		//把response相關資料存到txn_sm
 		for(i=0;i<txn_sm->number;i++)
 		{
-			memcpy(txn_sm->server_response[i],thread_array[i].thread_server_response,1000000);
+			memcpy(txn_sm->server_response[i],thread_array[i].thread_server_response,65535);
 			memcpy(txn_sm->filename[i],thread_array[i].thread_filename,200);
 			txn_sm->response_byte_read[i]=thread_array[i].thread_response_byte_read;
 		}
@@ -852,7 +912,7 @@ parse_url_and_send_request_use_pthread(TSCont contp, TSEvent event ATS_UNUSED, v
 		//初始化
 		txn_sm->count=0;
 		free(thread_array);
-		
+		free(thread_handles);
 	TSDebug("HTTP_plugin", "end receive");	
 	set_handler(txn_sm->q_current_handler, (TxnSMHandler)&state_interface_with_server);
 	txn_sm->q_cache_write_vio = TSVConnWrite(txn_sm->q_cache_vc, contp,txn_sm->q_cache_response_buffer_reader, 
@@ -992,8 +1052,26 @@ state_interface_with_server(TSCont contp, TSEvent event, TSVIO vio)
       TSIOBufferReaderFree(txn_sm->q_cache_response_buffer_reader);
 
       /* Open cache_vc to read data and send to client. */
-      set_handler(txn_sm->q_current_handler, (TxnSMHandler)&state_handle_cache_lookup);
-      txn_sm->q_pending_action = TSCacheRead(contp, txn_sm->q_key);
+  //    set_handler(txn_sm->q_current_handler, (TxnSMHandler)&state_handle_cache_lookup);
+  //    txn_sm->q_pending_action = TSCacheRead(contp, txn_sm->q_key);
+	if( (txn_sm->count == 0) && (txn_sm->number != 0) )
+	{//jesse
+			
+		
+			TSCacheKeyDestroy(txn_sm->q_key);
+			txn_sm->q_key =NULL;
+			
+			TSDebug("HTTP_plugin", "create cachekey is == %s",txn_sm->filename[txn_sm->count]);
+			txn_sm->q_key = (TSCacheKey)CacheKeyCreate(txn_sm->filename[txn_sm->count]);	//利用q_file_name建立cache key
+	
+			set_handler(txn_sm->q_current_handler, (TxnSMHandler)&jeese_test);
+			txn_sm->q_pending_action = TSCacheWrite(contp, txn_sm->q_key);
+			
+	return TS_SUCCESS;
+	}
+  
+  
+  
     } else { /* not done with writing into cache */
 
       TSDebug("HTTP_plugin", "cache_response_length is %d, server response length is %d", txn_sm->q_cache_response_length,
@@ -1186,8 +1264,15 @@ jesse_test_write_complete(TSCont contp, TSEvent event, TSVIO vio)
 			  //set_handler(txn_sm->q_current_handler, (TxnSMHandler)&state_handle_cache_lookup);
 			  //txn_sm->q_pending_action = TSCacheRead(contp, txn_sm->q_key);
 		
-		if(txn_sm->count == (txn_sm->number-1))
-			return state_done(contp, 0, NULL) ;
+		if(txn_sm->count == (txn_sm->number-1)) //如果pthread請求都存完，準備送出第一個response給client
+		{
+			TSCacheKeyDestroy(txn_sm->q_key);
+			txn_sm->q_key =NULL;
+			TSDebug("HTTP_plugin", "create cachekey is == %s",txn_sm->q_file_name);
+			txn_sm->q_key = (TSCacheKey)CacheKeyCreate(txn_sm->q_file_name);	//利用q_file_name建立cache key
+			set_handler(txn_sm->q_current_handler, (TxnSMHandler)&state_handle_cache_lookup);
+			txn_sm->q_pending_action = TSCacheRead(contp, txn_sm->q_key);
+		}			
 		else
 		{
 			TSDebug("HTTP_plugin", "enter next file write to cache");
@@ -1250,21 +1335,8 @@ state_send_response_to_client(TSCont contp, TSEvent event, TSVIO vio)
     txn_sm->q_client_write_vio = NULL;
 	TSDebug("HTTP_plugin", "txn_sm->count=%d",txn_sm->count);
 	TSDebug("HTTP_plugin", " txn_sm->number=%d ",txn_sm->number );
-	if( (txn_sm->count == 0) && (txn_sm->number != 0) )
-	{//jesse
-			
-		
-			TSCacheKeyDestroy(txn_sm->q_key);
-			txn_sm->q_key =NULL;
-			
-			TSDebug("HTTP_plugin", "create cachekey is == %s",txn_sm->filename[txn_sm->count]);
-			txn_sm->q_key = (TSCacheKey)CacheKeyCreate(txn_sm->filename[txn_sm->count]);	//利用q_file_name建立cache key
-	
-			set_handler(txn_sm->q_current_handler, (TxnSMHandler)&jeese_test);
-			txn_sm->q_pending_action = TSCacheWrite(contp, txn_sm->q_key);
-			
-	return TS_SUCCESS;
-	}
+	//write here 寫入cache
+	//.............................................................
 	
     return state_done(contp, 0, NULL);
 
@@ -1315,37 +1387,45 @@ int
 state_done(TSCont contp, TSEvent event ATS_UNUSED, TSVIO vio ATS_UNUSED)
 {
   TxnSM *txn_sm = (TxnSM *)TSContDataGet(contp);
-/*
-  TSDebug("HTTP_plugin", "jesse enter state_done");
 
+  TSDebug("HTTP_plugin", "jesse enter state_done");
+//  TSDebug("HTTP_plugin","txn_sm->count=0 and txn_sm->number=0");
+  txn_sm->count=0;
+  txn_sm->number=0;
+ 
  if(txn_sm->server_response != NULL)
   {
-	TSDebug("HTTP_plugin", "jesse enter free server_response");
-	free(txn_sm->server_response);
+//	TSDebug("HTTP_plugin", "jesse enter free server_response");
+	//free(txn_sm->server_response);
+	txn_sm->server_response = NULL;
   }
   
   if(txn_sm->filename != NULL)
   {
-	TSDebug("HTTP_plugin", "jesse enter free filename");
-	free(txn_sm->filename);
-  }
+//	TSDebug("HTTP_plugin", "jesse enter free filename");
+	//free(txn_sm->filename);
+	txn_sm->filename = NULL;
+ }
   
    if(txn_sm->response_byte_read != NULL)
   {
-	TSDebug("HTTP_plugin", "jesse enter free response_byte_read");
-	free(txn_sm->response_byte_read);
+//	TSDebug("HTTP_plugin", "jesse enter free response_byte_read");
+//	free(txn_sm->response_byte_read);
+	txn_sm->response_byte_read = NULL;
   }
-  */
+  
+  
+  
   if (txn_sm->q_pending_action && !TSActionDone(txn_sm->q_pending_action)) {
-    TSDebug("HTTP_plugin", "cancelling pending action %p", txn_sm->q_pending_action);
+//    TSDebug("HTTP_plugin", "cancelling pending action %p", txn_sm->q_pending_action);
     TSActionCancel(txn_sm->q_pending_action);
   } else if (txn_sm->q_pending_action) {
     TSDebug("HTTP_plugin", "action is done %p", txn_sm->q_pending_action);
   }
-TSDebug("HTTP_plugin", "enter state_done  q_pending_action");
+//TSDebug("HTTP_plugin", "enter state_done  q_pending_action");
   txn_sm->q_pending_action = NULL;
   txn_sm->q_mutex          = NULL;
-TSDebug("HTTP_plugin", "enter state_done  q_client_request_buffer");
+//TSDebug("HTTP_plugin", "enter state_done  q_client_request_buffer");
   if (txn_sm->q_client_request_buffer) {
     if (txn_sm->q_client_request_buffer_reader)
       TSIOBufferReaderFree(txn_sm->q_client_request_buffer_reader);
@@ -1353,7 +1433,7 @@ TSDebug("HTTP_plugin", "enter state_done  q_client_request_buffer");
     txn_sm->q_client_request_buffer        = NULL;
     txn_sm->q_client_request_buffer_reader = NULL;
   }
-TSDebug("HTTP_plugin", "enter state_done q_client_response_buffer");
+//TSDebug("HTTP_plugin", "enter state_done q_client_response_buffer");
   if (txn_sm->q_client_response_buffer) {
     if (txn_sm->q_client_response_buffer_reader)
       TSIOBufferReaderFree(txn_sm->q_client_response_buffer_reader);
@@ -1362,7 +1442,7 @@ TSDebug("HTTP_plugin", "enter state_done q_client_response_buffer");
     txn_sm->q_client_response_buffer        = NULL;
     txn_sm->q_client_response_buffer_reader = NULL;
   }
-TSDebug("HTTP_plugin", "enter state_done q_cache_read_buffer");
+//TSDebug("HTTP_plugin", "enter state_done q_cache_read_buffer");
   if (txn_sm->q_cache_read_buffer) {
     if (txn_sm->q_cache_read_buffer_reader)
       TSIOBufferReaderFree(txn_sm->q_cache_read_buffer_reader);
@@ -1370,7 +1450,7 @@ TSDebug("HTTP_plugin", "enter state_done q_cache_read_buffer");
     txn_sm->q_cache_read_buffer        = NULL;
     txn_sm->q_cache_read_buffer_reader = NULL;
   }
-TSDebug("HTTP_plugin", "enter state_done q_server_request_buffer");
+//TSDebug("HTTP_plugin", "enter state_done q_server_request_buffer");
   if (txn_sm->q_server_request_buffer) {
     if (txn_sm->q_server_request_buffer_reader)
       TSIOBufferReaderFree(txn_sm->q_server_request_buffer_reader);
@@ -1378,44 +1458,44 @@ TSDebug("HTTP_plugin", "enter state_done q_server_request_buffer");
     txn_sm->q_server_request_buffer        = NULL;
     txn_sm->q_server_request_buffer_reader = NULL;
   }
-TSDebug("HTTP_plugin", "enter state_done q_server_response_buffer");
+//TSDebug("HTTP_plugin", "enter state_done q_server_response_buffer");
   if (txn_sm->q_server_response_buffer) {
     TSIOBufferDestroy(txn_sm->q_server_response_buffer);
     txn_sm->q_server_response_buffer = NULL;
   }
-TSDebug("HTTP_plugin", "enter state_done q_server_name");
+//TSDebug("HTTP_plugin", "enter state_done q_server_name");
   if (txn_sm->q_server_name) {
 	  TSDebug("HTTP_plugin", "enter state_done free q_server_name");
     //free(txn_sm->q_server_name);
 	TSDebug("HTTP_plugin", "enter state_done q_server_name null");
     txn_sm->q_server_name = NULL;
   }
-TSDebug("HTTP_plugin", "enter state_done q_file_name");
+//TSDebug("HTTP_plugin", "enter state_done q_file_name");
   if (txn_sm->q_file_name) {
     //free(txn_sm->q_file_name);
     txn_sm->q_file_name = NULL;
   }
-TSDebug("HTTP_plugin", "enter state_done q_key");
+//TSDebug("HTTP_plugin", "enter state_done q_key");
   if (txn_sm->q_key)
     TSCacheKeyDestroy(txn_sm->q_key);
-TSDebug("HTTP_plugin", "enter state_done q_client_request");
+//TSDebug("HTTP_plugin", "enter state_done q_client_request");
   if (txn_sm->q_client_request) {
     //free(txn_sm->q_client_request);
     txn_sm->q_client_request = NULL;
   }
-TSDebug("HTTP_plugin", "enter state_done q_server_response");
+//TSDebug("HTTP_plugin", "enter state_done q_server_response");
   if (txn_sm->q_server_response) {
     //free(txn_sm->q_server_response);
     txn_sm->q_server_response = NULL;
   }
-  TSDebug("HTTP_plugin", "enter state_done txn_sm");
+ // TSDebug("HTTP_plugin", "enter state_done txn_sm");
   if (txn_sm) {
     txn_sm->q_magic = TXN_SM_DEAD;
     //free(txn_sm);
   }
-  TSDebug("HTTP_plugin", "enter state_done TSContDestroy");
+  //TSDebug("HTTP_plugin", "enter state_done TSContDestroy");
   TSContDestroy(contp);
-  TSDebug("HTTP_plugin", "enter state_done TS_EVENT_NONE");
+ // TSDebug("HTTP_plugin", "enter state_done TS_EVENT_NONE");
   
   	int ret_val;
 	ret_val = TSTextLogObjectWrite(protocol_plugin_log, "Close all connect");
@@ -1561,59 +1641,44 @@ int get_header_length(char http_response[]){
 
 
 
-void parsing_request_one_URL(char *k,char *one_url)
-{
+void parsing_request_all_URL(char *server_respone,char *result_parsing_url , int response_size,int array_size, int *num)
+{		
+	int count=0,url_num=0;
 	char *front_ptr_url,*end_ptr_url;
-	char src_double_quotes[]="src=\"/";
-	char src_apostrophe[]="src='/";
-		
-	if(strncmp(k,src_double_quotes,6)==0)
+	char temp[100][200];
+	
+
+	while( count < response_size  )
+	{
+		if( strncmp(server_respone,"src=\"/",6) == 0)
 		{
-			front_ptr_url=strstr(k,"=\"");
+			front_ptr_url=strstr(server_respone,"=\"");
 			front_ptr_url+=2;
 			end_ptr_url=strchr(front_ptr_url,'\"');
-			memcpy(one_url,front_ptr_url,end_ptr_url-front_ptr_url);
+			memcpy( temp[url_num++],front_ptr_url,end_ptr_url-front_ptr_url);	
 		}
-		
-	else if(strncmp(k,src_apostrophe,6)==0)
+		else if(strncmp(server_respone,"src='/",6) == 0)
 		{
-			front_ptr_url=strstr(k,"='");
+			front_ptr_url=strstr(server_respone,"='");
 			front_ptr_url+=2;
 			end_ptr_url=strchr(front_ptr_url,'\'');
-			memcpy(one_url,front_ptr_url,end_ptr_url-front_ptr_url);
-		}	
-}
-void parsing_request_all_URL(char *server_respone,char *result_parsing_url , int size, int *num)
-{		
-	int count=0,i;
-	char *front_ptr_url;
-	char src_double_quotes[]="src=\"/";
-	char src_apostrophe[]="src='/";
-	char temp[100][200];
-
-	//解析出  
-	front_ptr_url=strstr(server_respone,src_double_quotes);			
-	while(front_ptr_url!=NULL){  
-	
-		parsing_request_one_URL(front_ptr_url,temp[count++]);
-		front_ptr_url+=1;
-		front_ptr_url=strstr(front_ptr_url,src_double_quotes);
+			memcpy( temp[url_num++],front_ptr_url,end_ptr_url-front_ptr_url);
+			
+		}
+		
+		server_respone++;
+		count++;
 	}
-	
-	front_ptr_url=strstr(server_respone,src_apostrophe);				
-	while(front_ptr_url!=NULL){
-		parsing_request_one_URL(front_ptr_url,temp[count++]); 
-		front_ptr_url+=1;
-		front_ptr_url=strstr(front_ptr_url,src_apostrophe);
-	}	
+
+
 	//把解析出的網址數量存到num 
-	*num=count;	
+	*num=url_num;	
 	
 	//把解析出來的每個網址存到二維陣列中 
-	for(i=0;i<count;i++)
+	for(count=0;count<url_num;count++)
 	{	
-		memcpy(result_parsing_url,temp[i],200);	
-		result_parsing_url+=size;
+		memcpy(result_parsing_url,temp[count],200);	
+		result_parsing_url+=array_size;
 		
 	}
 }
